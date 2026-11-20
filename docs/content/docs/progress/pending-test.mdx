@@ -5771,3 +5771,9 @@ URL 使用归属校验后的资源访问地址，本地存储也可签发厂商�
 - 已修复：脚本加载失败或十秒内无响应时显示重试入口，重试重建失败的脚本节点；验证过期、出错与超时均清除旧令牌。容器跨越 300px 宽度时切换 compact／flexible 实例，忽略旧实例及卸载后的回调。
 - 自动化回归使用真实组件与受控脚本事件，不连接 Cloudflare、不消耗真实验证凭据。
 - [ ] 真实站点密钥下复核加载失败、重新验证、320px／390px 与桌面宽度切换；Safari、Firefox 和手机真机待验收。
+
+## vgenv 视频协议插件
+
+- 已实现：新增官方声明式协议插件 `vgenv-video`（V3，模型 ID 写成 `<model>:<tier>`），支持文生视频、首帧、尾帧、首尾帧、全能参考（最多 9 张）与首帧 + 参考图；创建带 `Idempotency-Key`，轮询/取消走 `/v3/videos/{id}`，参考图与首尾帧分别发送 `reference_images` 和 `frame_images`。协议声明 `referenceSyntax`（`<Picture {n}>`、`[First frame]`、`[Last frame]`，尊重画布首尾帧节点），短剧参考图编号契约 `videoReferences` 按 `<Picture {n}>` 核对；`reference-images` 布局兼容 OpenAI 风格嵌套 `image_url.url` 线格式。前端默认能力：时长 2–15 秒、9:16 默认、480p/768p、仅 `reference_to_video`。
+- 自动回归：协议包加载、文生视频 / 首尾帧 / 全能参考 payload、参考图改写与短剧编号测试均已通过；生成器自检与前端类型检查通过。
+- [ ] 用真实 vgenv API Key 验证文生视频、首尾帧、全能参考（含 9 张上限提示）与短剧参考图编号的实际出单、轮询到 `succeeded` 取回签名地址转存、取消与幂等重试；确认 202 与失败终态的提示文案。

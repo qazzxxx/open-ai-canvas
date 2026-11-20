@@ -15,6 +15,7 @@ func TestProviderErrorDetail(t *testing.T) {
 		{"parameter", `{"message":"size must be 1024x1024","request_id":"private","url":"https://private.test"}`, "size must be 1024x1024"},
 		{"url", `{"error":"请修改图片尺寸 https://private.test/path?q=value"}`, "请修改图片尺寸 [链接已隐藏]"},
 		{"detail", `{"detail":"请上传 PNG 图片"}`, "请上传 PNG 图片"},
+		{"array message", `{"message":["prompt must be a string of 5–30000 characters"]}`, "prompt must be a string of 5–30000 characters"},
 		{"plain", "请缩短提示词", "请缩短提示词"},
 		{"token limit", `{"message":"max_tokens must be less than 4096"}`, "max_tokens must be less than 4096"},
 		{"balance", `{"message":"渠道余额不足，剩余 1.25 元"}`, ""},

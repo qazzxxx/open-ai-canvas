@@ -547,6 +547,17 @@ export function defaultModelCapabilityConfig(protocol?: ModelProtocol, model = "
         video.defaultResolution = "720P";
         video.operations.push("reference_to_video", "audio_to_video");
     }
+    if (protocol === "vgenv-video") {
+        video.references.maxImages = 9;
+        video.references.maxVideos = 0;
+        video.references.maxAudios = 0;
+        video.duration = { selection: "range", min: 2, max: 15, step: 1, default: 5 };
+        video.ratios = ["9:16", "2:3", "3:4", "1:1", "4:3", "3:2", "16:9", "21:9"];
+        video.defaultRatio = "9:16";
+        video.resolutions = ["480p", "768p"];
+        video.defaultResolution = "768p";
+        video.operations.push("reference_to_video");
+    }
     if (protocol === VOLCENGINE_MEDIAKIT_ENHANCE_VIDEO_PROTOCOL) {
         // 与后端默认值一致：只接收一个源视频，帧率默认保持原片。
         video.references = { ...video.references, minImages: 0, maxImages: 0, maxImageBytes: 0, maxVideos: 1, maxVideoDurationSeconds: DEFAULT_VIDEO_PROCESSING_MAX_SOURCE_SECONDS, maxAudios: 0 };

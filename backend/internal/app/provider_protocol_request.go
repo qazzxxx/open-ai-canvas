@@ -65,6 +65,12 @@ func protocolRequestFromInput(input canvasGenerationInput) protocol.GenerationRe
 			"count":             input.Config.Count,
 		},
 	}
+	// 画布显式选择的首帧/尾帧节点；声明了 referenceSyntax.honorFrameNodes 的协议据此区分首尾帧与参考图。
+	for _, key := range []string{"videoStartFrameNodeId", "videoEndFrameNodeId"} {
+		if value := metadataString(input.Metadata, key); value != "" {
+			request.Extra[key] = value
+		}
+	}
 	for _, message := range input.TextHistory {
 		role := strings.ToLower(strings.TrimSpace(message.Role))
 		if role != "user" && role != "assistant" && role != "system" {

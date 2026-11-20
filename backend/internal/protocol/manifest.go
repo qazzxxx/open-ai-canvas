@@ -365,6 +365,9 @@ func ValidateManifest(manifest Manifest) error {
 		if provider.DetachedPolling && provider.Poll == nil {
 			return fmt.Errorf("provider %q detachedPolling requires a poll operation", provider.ID)
 		}
+		if err := validateReferenceSyntax(provider.ReferenceSyntax); err != nil {
+			return fmt.Errorf("provider %q referenceSyntax: %w", provider.ID, err)
+		}
 		if provider.Upload != nil {
 			if err := validateManifestOperation(provider.Upload.ManifestOperation); err != nil {
 				return fmt.Errorf("provider %q upload operation: %w", provider.ID, err)
@@ -512,6 +515,7 @@ func normalizeManifestForProvider(manifest *Manifest, index int) error {
 	manifest.Metadata.RequiresPublicMediaURLs = provider.RequiresPublicMediaURLs
 	manifest.Metadata.DetachedPolling = provider.DetachedPolling
 	manifest.Metadata.IdempotentCreate = provider.IdempotentCreate
+	manifest.Metadata.ReferenceSyntax = provider.ReferenceSyntax
 	manifest.Metadata.Kind = provider.Kind
 	manifest.Metadata.Execution = manifest.Runtime.Backend
 	manifest.Create = provider.Create

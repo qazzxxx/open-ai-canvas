@@ -66,6 +66,10 @@ func (a manifestAdapter) BuildCreate(_ context.Context, c RequestContext) (Reque
 	if err != nil {
 		return RequestSpec{}, err
 	}
+	request, err = applyReferenceSyntax(a.manifest.Metadata.ReferenceSyntax, request)
+	if err != nil {
+		return RequestSpec{}, err
+	}
 	if err := validateManifestRequest(a.manifest.Validations, request); err != nil {
 		return RequestSpec{}, err
 	}

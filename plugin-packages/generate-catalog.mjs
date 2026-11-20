@@ -756,6 +756,71 @@ add({
   })
 });
 
+// vgenv V3 视频：模型 ID 写成 "<model>:<tier>"（如 base:fast），model 取 base / cinematic / origin，
+// tier 取 fast / standard / enhanced / quality；省略档位时用 fast。官方 OpenAPI：https://api.vgenv.com/docs-json
+// 图片三种互斥形态：reference_images（1–9 张，全能参考）、frame_images（首帧/尾帧/首尾帧）、
+// 首帧 + 参考图（首帧放 frame_images，参考图放 reference_images，仅 Base/Cinematic 且无尾帧）。
+// 参考视频与参考音频必须先走三步素材上传，声明式 upload 只支持单请求，因此本插件只接图片。
+const vgenvModel = { $at: [split(ref("request.model"), ":"), 0] };
+const vgenvTier = coalesce({ $at: [split(ref("request.model"), ":"), 1] }, "fast");
+const vgenvFirstFrames = mediaWithRoles("request.images", ["first_frame"]);
+const vgenvLastFrames = mediaWithRoles("request.images", ["last_frame"]);
+const vgenvReferenceImages = mediaWithRoles("request.images", ["reference_image", "subject_reference", "style_reference", ""]);
+const vgenvImage = (media) => ({ type: "image_url", image_url: { url: ref(`${media}.value`) } });
+const vgenvFrame = (type) => (path) => map(path, "media", { ...vgenvImage("media"), frame_type: type });
+
+add({
+  id: "vgenv-video", providerId: "vgenv-video", name: "vgenv Video", vendor: "vgenv", capability: "video",
+  description: "vgenv V3 异步视频接口：文生视频、首帧、尾帧、首尾帧、全能参考（最多 9 张图）与首帧 + 参考图。",
+  readmeIntro: "vgenv 官方声明式视频协议插件（V3，Base / Cinematic / Origin），支持文生视频、首帧、尾帧、首尾帧、全能参考和首帧 + 参考图；模型 ID 写成 `<model>:<tier>`。",
+  baseUrl: "https://api.vgenv.com", auth: bearer, params: videoParams,
+  requiresPublicMediaUrls: false, detachedPolling: true, idempotentCreate: true,
+  referenceSyntax: { image: "<Picture {n}>", firstFrame: "[First frame]", lastFrame: "[Last frame]", honorFrameNodes: true, singleImageIsFirstFrame: true },
+  videoReferences: { layout: "reference-images", token: "<Picture {n}>" },
+  validations: [
+    { assert: { $gte: [len(trim(ref("request.prompt"))), 5] }, message: "vgenv 提示词至少需要 5 个字符，请补充动作、场景或角色描述" },
+    { assert: { $in: [vgenvModel, ["base", "cinematic", "origin"]] }, message: "vgenv 模型 ID 必须写成 <model>:<tier>，model 为 base、cinematic 或 origin" },
+    { assert: { $in: [vgenvTier, ["fast", "standard", "enhanced", "quality"]] }, message: "vgenv 档位必须是 fast、standard、enhanced 或 quality" },
+    { assert: { $or: [eq(ref("request.duration"), 0), { $and: [gte(ref("request.duration"), 2), lte(ref("request.duration"), 15)] }] }, message: "vgenv 视频时长应为 2–15 秒整数（480p 为 4–15 秒）" },
+    { assert: { $in: [lower(trim(coalesce(ref("request.resolution"), "480p"))), ["480p", "768p"]] }, message: "vgenv 分辨率只支持 480p 或 768p" },
+    { assert: { $in: [coalesce(trim(ref("request.aspectRatio")), "9:16"), ["9:16", "2:3", "3:4", "1:1", "4:3", "3:2", "16:9", "21:9"]] }, message: "vgenv 不支持该画幅比例" },
+    { assert: { $lte: [len(vgenvReferenceImages), 9] }, message: "vgenv 最多支持 9 张参考图" },
+    { assert: { $lte: [len(vgenvFirstFrames), 1] }, message: "vgenv 首帧最多 1 张" },
+    { assert: { $lte: [len(vgenvLastFrames), 1] }, message: "vgenv 尾帧最多 1 张" },
+    { assert: eq(len(ref("request.videos")), 0), message: "vgenv 参考视频需要先上传为素材，当前插件暂不支持，请移除参考视频" },
+    { assert: eq(len(ref("request.audios")), 0), message: "vgenv 参考音频需要先上传为素材，当前插件暂不支持，请移除参考音频" },
+    { assert: { $not: { $and: [gt(len(vgenvLastFrames), 0), gt(len(vgenvReferenceImages), 0)] } }, message: "vgenv 尾帧不能与参考图同时使用；请改用“首帧 + 参考图”，或去掉参考图" },
+    { assert: { $or: [ne(vgenvModel, "origin"), eq(len(vgenvReferenceImages), 0), eq(len(vgenvFirstFrames), 0)] }, message: "vgenv Origin 不支持“首帧 + 参考图”，请改用 Base 或 Cinematic" }
+  ],
+  create: jsonCreate("/v3/videos", {
+    model: vgenvModel, tier: vgenvTier, prompt: ref("request.prompt"),
+    duration: omit(conditional(gt(ref("request.duration"), 0), ref("request.duration"), null)),
+    resolution: omit(lower(trim(ref("request.resolution")))),
+    aspect_ratio: omit(trim(ref("request.aspectRatio"))),
+    seed: omit(ref("request.providerOptions.vgenv-video.seed")),
+    prompt_optimization: omit(conditional(ref("request.providerOptions.vgenv-video.prompt_optimization"), { mode: ref("request.providerOptions.vgenv-video.prompt_optimization") })),
+    combat_enhancement: omit(conditional(ref("request.providerOptions.vgenv-video.combat_enhancement"), true)),
+    motion_speed: omit(conditional(ref("request.providerOptions.vgenv-video.combat_enhancement"), ref("request.providerOptions.vgenv-video.motion_speed"))),
+    upscale: omit(conditional(eq(ref("request.providerOptions.vgenv-video.upscale"), "2x"), "2x")),
+    frame_images: omit({ $concatArrays: [vgenvFrame("first_frame")(vgenvFirstFrames), vgenvFrame("last_frame")(vgenvLastFrames)] }),
+    reference_images: omit(map(vgenvReferenceImages, "media", vgenvImage("media")))
+  }, { headers: { "Idempotency-Key": ref("request.extra.idempotencyKey") } }),
+  poll: { method: "GET", path: "/v3/videos/{{taskId}}" },
+  cancel: { method: "DELETE", path: "/v3/videos/{{taskId}}" },
+  response: {
+    taskId: coalesce(ref("response.id"), ref("taskId")),
+    status: coalesce(ref("response.status"), "queued"),
+    message: coalesce(ref("response.error.message"), ref("response.message")),
+    stage: conditional(eq(ref("response.status"), "preparing"), "准备素材与审核提示词"),
+    queueAhead: ref("response.queue_position"),
+    videos: ref("response.output.url"),
+    usage: omit({ priceCurrency: ref("response.price.currency"), priceAmountMicros: ref("response.price.amount_micros") }),
+    errorPaths: ["error.code"],
+    resultEphemeral: true
+  },
+  notes: "模型 ID 写成 <model>:<tier>。创建返回 HTTP 202，轮询 GET /v3/videos/{id}，状态 preparing/queued/running 为进行中，succeeded 取 output.url（签名地址 24 小时有效，宿主立即下载转存），failed/cancelled 为终态；只有 preparing/queued 可取消。Idempotency-Key 由宿主任务提交键提供，同一键重试不会重复冻结余额。图片只接受 JPEG/PNG/WebP 公网 HTTPS 地址或 Data URL，单张不超过 5 MiB。"
+});
+
 // Agnes 图像是同步端点，文生图与图生图共用 POST /v1/images/generations：
 // 不传 image 为文生图，传 image 为图生图或多图合成。官方参数表只承认
 // model、prompt、size（必填，档位 1K/2K/3K/4K 或 WxH 精确尺寸）、ratio、image、
@@ -1355,6 +1420,9 @@ function manifestFor(spec) {
         scopes,
         baseUrl: spec.baseUrl,
         requiresPublicMediaUrls: spec.requiresPublicMediaUrls === true,
+        ...(spec.detachedPolling ? { detachedPolling: true } : {}),
+        ...(spec.idempotentCreate ? { idempotentCreate: true } : {}),
+        ...(spec.referenceSyntax ? { referenceSyntax: spec.referenceSyntax } : {}),
         auth: spec.auth,
         ...(spec.imageParameters ? { imageParameters: spec.imageParameters } : {}),
         ...(spec.videoReferences ? { videoReferences: spec.videoReferences } : {}),

@@ -30,6 +30,14 @@ func providerErrorMessageField(value any) string {
 	switch value := value.(type) {
 	case string:
 		return strings.TrimSpace(value)
+	case []any:
+		var items []string
+		for _, item := range value {
+			if message := providerErrorMessageField(item); message != "" {
+				items = append(items, message)
+			}
+		}
+		return strings.Join(items, "；")
 	case map[string]any:
 		for _, key := range []string{"error", "message", "msg", "detail"} {
 			if message := providerErrorMessageField(value[key]); message != "" {

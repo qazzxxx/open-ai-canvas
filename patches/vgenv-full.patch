@@ -1,0 +1,2945 @@
+diff --git a/backend/internal/app/provider_drama_references.go b/backend/internal/app/provider_drama_references.go
+index 783fa8f..73b53c6 100644
+--- a/backend/internal/app/provider_drama_references.go
++++ b/backend/internal/app/provider_drama_references.go
+@@ -43,6 +43,7 @@ var dramaReferenceProtocolLayouts = map[string]string{
+ 	"maxforai-video-generations":                        "images",
+ 	"km-kemei-video":                                    "role-images",
+ 	"wenew-h3-video":                                    "inputs-images",
++	"vgenv-video":                                       "vgenv-video",
+ 	"lxmone-h3-workflow":                                "input-reference",
+ 	string(model.ChannelInterfaceNewAPIVideo):           "openai-files",
+ 	"coolhs-wan3-relay":                                 "media-tokens",
+@@ -327,6 +328,16 @@ func dramaReferenceRequestLayout(body map[string]any, files []protocol.RequestFi
+ 		for index := range layout.slots {
+ 			layout.slots[index].token = fmt.Sprintf("<Picture %d>", index+1)
+ 		}
++	case "vgenv-video":
++		if refImages, ok := body["reference_images"].([]any); ok {
++			for index, raw := range refImages {
++				item, _ := raw.(map[string]any)
++				image, _ := item["image_url"].(map[string]any)
++				url := stringField(image, "url")
++				token := fmt.Sprintf("<Picture %d>", index+1)
++				layout.slots = append(layout.slots, dramaReferenceSlot{value: url, role: "reference_image", token: token})
++			}
++		}
+ 	case "input-reference":
+ 		if err := addArray(body["input_reference"], "reference_image"); err != nil {
+ 			return layout, err
+diff --git a/backend/internal/app/provider_drama_references_test.go b/backend/internal/app/provider_drama_references_test.go
+index 711bc2f..809342f 100644
+--- a/backend/internal/app/provider_drama_references_test.go
++++ b/backend/internal/app/provider_drama_references_test.go
+@@ -59,6 +59,7 @@ func TestProviderDramaReferenceOfficialPayloads(t *testing.T) {
+ 		{protocol: "metaso-h3", model: "MiniMax-H3"},
+ 		{protocol: "volcengine-jimeng-video"},
+ 		{protocol: "wenew-h3-video", model: "h3_video", resolution: "768p"},
++		{protocol: "vgenv-video", model: "base:fast", resolution: "768p", prefix: "<Picture "},
+ 		{protocol: "dashscope-wan3-video", model: "wan3.0-video-prime"},
+ 		{protocol: "dashscope-wan-video"},
+ 		{protocol: "rolldek-wan-video"},
+@@ -106,7 +107,7 @@ func TestProviderDramaReferenceOfficialPayloads(t *testing.T) {
+ 				first, second = 2, 3
+ 			}
+ 			want := fmt.Sprintf("%s%d：人物\n%s%d：场景\n\n%s%d走入%s%d。", prefix, first, prefix, second, prefix, first, prefix, second)
+-			if test.protocol == "wenew-h3-video" {
++			if test.protocol == "wenew-h3-video" || test.protocol == "vgenv-video" {
+ 				want = "<Picture 1>：人物\n<Picture 2>：场景\n\n<Picture 1>走入<Picture 2>。"
+ 			}
+ 			if got := layout.promptBody[layout.promptKey]; got != want {
+diff --git a/backend/internal/app/provider_error_message.go b/backend/internal/app/provider_error_message.go
+index 66f3e09..bba0665 100644
+--- a/backend/internal/app/provider_error_message.go
++++ b/backend/internal/app/provider_error_message.go
+@@ -30,6 +30,14 @@ func providerErrorMessageField(value any) string {
+ 	switch value := value.(type) {
+ 	case string:
+ 		return strings.TrimSpace(value)
++	case []any:
++		var items []string
++		for _, item := range value {
++			if message := providerErrorMessageField(item); message != "" {
++				items = append(items, message)
++			}
++		}
++		return strings.Join(items, "；")
+ 	case map[string]any:
+ 		for _, key := range []string{"error", "message", "msg", "detail"} {
+ 			if message := providerErrorMessageField(value[key]); message != "" {
+diff --git a/backend/internal/app/provider_error_message_test.go b/backend/internal/app/provider_error_message_test.go
+index aab7fe3..cb525c3 100644
+--- a/backend/internal/app/provider_error_message_test.go
++++ b/backend/internal/app/provider_error_message_test.go
+@@ -15,6 +15,7 @@ func TestProviderErrorDetail(t *testing.T) {
+ 		{"parameter", `{"message":"size must be 1024x1024","request_id":"private","url":"https://private.test"}`, "size must be 1024x1024"},
+ 		{"url", `{"error":"请修改图片尺寸 https://private.test/path?q=value"}`, "请修改图片尺寸 [链接已隐藏]"},
+ 		{"detail", `{"detail":"请上传 PNG 图片"}`, "请上传 PNG 图片"},
++		{"array message", `{"message":["prompt must be a string of 5–30000 characters"]}`, "prompt must be a string of 5–30000 characters"},
+ 		{"plain", "请缩短提示词", "请缩短提示词"},
+ 		{"token limit", `{"message":"max_tokens must be less than 4096"}`, "max_tokens must be less than 4096"},
+ 		{"balance", `{"message":"渠道余额不足，剩余 1.25 元"}`, ""},
+diff --git a/backend/internal/app/provider_errors.go b/backend/internal/app/provider_errors.go
+index a7ad457..a1d310b 100644
+--- a/backend/internal/app/provider_errors.go
++++ b/backend/internal/app/provider_errors.go
+@@ -248,6 +248,8 @@ func providerPayloadErrorCategory(raw string) (string, bool) {
+ 	case (strings.Contains(normalized, "thinking") || strings.Contains(normalized, "reasoning")) && strings.Contains(normalized, "tool_choice"),
+ 		strings.Contains(normalized, "tool_choice") && (strings.Contains(normalized, "not support") || strings.Contains(normalized, "unsupported")):
+ 		return "当前模型为思考/推理模式，不支持强制工具调用（tool_choice=required），请改用自动工具选择或更换非思考模式模型", true
++	case strings.Contains(normalized, "prompt must be") && strings.Contains(normalized, "characters"):
++		return "提示词字符数不符合模型要求，vgenv 提示词必须在 5 到 30000 个字符之间，请补充描述", true
+ 	case strings.Contains(normalized, "invalid"), strings.Contains(normalized, "parameter"), strings.Contains(normalized, "argument"):
+ 		return "模型服务拒绝了请求，请检查模型和参数", true
+ 	}
+diff --git a/backend/internal/app/provider_protocol_request.go b/backend/internal/app/provider_protocol_request.go
+index 2257f71..8da04d7 100644
+--- a/backend/internal/app/provider_protocol_request.go
++++ b/backend/internal/app/provider_protocol_request.go
+@@ -65,6 +65,12 @@ func protocolRequestFromInput(input canvasGenerationInput) protocol.GenerationRe
+ 			"count":             input.Config.Count,
+ 		},
+ 	}
++	// 画布显式选择的首帧/尾帧节点；声明了 referenceSyntax.honorFrameNodes 的协议据此区分首尾帧与参考图。
++	for _, key := range []string{"videoStartFrameNodeId", "videoEndFrameNodeId"} {
++		if value := metadataString(input.Metadata, key); value != "" {
++			request.Extra[key] = value
++		}
++	}
+ 	for _, message := range input.TextHistory {
+ 		role := strings.ToLower(strings.TrimSpace(message.Role))
+ 		if role != "user" && role != "assistant" && role != "system" {
+diff --git a/backend/internal/generation/registry.go b/backend/internal/generation/registry.go
+index 8c4082b..0bf10f9 100644
+--- a/backend/internal/generation/registry.go
++++ b/backend/internal/generation/registry.go
+@@ -74,6 +74,8 @@ func OfficialDeclarativeVideoInterface(interfaceType string) (string, bool) {
+ 		return "火山方舟", true
+ 	case "wenew-h3-video":
+ 		return "WeNew H3", true
++	case "vgenv-video":
++		return "vgenv", true
+ 	case string(model.ChannelInterfaceVolcengineJiMengVideo):
+ 		return "即梦", true
+ 	case string(model.ChannelInterfaceNewAPIVideo):
+diff --git a/backend/internal/protocol/manifest.go b/backend/internal/protocol/manifest.go
+index 3544400..0a39e92 100644
+--- a/backend/internal/protocol/manifest.go
++++ b/backend/internal/protocol/manifest.go
+@@ -360,6 +360,9 @@ func ValidateManifest(manifest Manifest) error {
+ 		if provider.DetachedPolling && provider.Poll == nil {
+ 			return fmt.Errorf("provider %q detachedPolling requires a poll operation", provider.ID)
+ 		}
++		if err := validateReferenceSyntax(provider.ReferenceSyntax); err != nil {
++			return fmt.Errorf("provider %q referenceSyntax: %w", provider.ID, err)
++		}
+ 		if provider.Upload != nil {
+ 			if err := validateManifestOperation(provider.Upload.ManifestOperation); err != nil {
+ 				return fmt.Errorf("provider %q upload operation: %w", provider.ID, err)
+@@ -506,6 +509,7 @@ func normalizeManifestForProvider(manifest *Manifest, index int) error {
+ 	manifest.Metadata.RequiresPublicMediaURLs = provider.RequiresPublicMediaURLs
+ 	manifest.Metadata.DetachedPolling = provider.DetachedPolling
+ 	manifest.Metadata.IdempotentCreate = provider.IdempotentCreate
++	manifest.Metadata.ReferenceSyntax = provider.ReferenceSyntax
+ 	manifest.Metadata.Kind = provider.Kind
+ 	manifest.Metadata.Execution = manifest.Runtime.Backend
+ 	manifest.Create = provider.Create
+diff --git a/backend/internal/protocol/manifest_adapter.go b/backend/internal/protocol/manifest_adapter.go
+index a31a5b3..8ed896b 100644
+--- a/backend/internal/protocol/manifest_adapter.go
++++ b/backend/internal/protocol/manifest_adapter.go
+@@ -66,6 +66,10 @@ func (a manifestAdapter) BuildCreate(_ context.Context, c RequestContext) (Reque
+ 	if err != nil {
+ 		return RequestSpec{}, err
+ 	}
++	request, err = applyReferenceSyntax(a.manifest.Metadata.ReferenceSyntax, request)
++	if err != nil {
++		return RequestSpec{}, err
++	}
+ 	if err := validateManifestRequest(a.manifest.Validations, request); err != nil {
+ 		return RequestSpec{}, err
+ 	}
+diff --git a/backend/internal/protocol/reference_syntax.go b/backend/internal/protocol/reference_syntax.go
+new file mode 100644
+index 0000000..365f72e
+--- /dev/null
++++ b/backend/internal/protocol/reference_syntax.go
+@@ -0,0 +1,153 @@
++// 声明式协议的“素材角色与提示词引用约定”：上游对首帧/尾帧/参考图的区分，以及提示词里引用某张图的写法。
++//
++// 画布提示词用 @图片N 引用第 N 张连接的图片（编号按连线顺序，首帧与尾帧同样计入）。
++// 宿主按清单声明把它改写成上游认识的令牌，避免每个插件各自猜编号。
++
++package protocol
++
++import (
++	"fmt"
++	"regexp"
++	"sort"
++	"strconv"
++	"strings"
++)
++
++// ManifestReferenceSyntax 由插件声明，宿主在 BuildCreate 之前应用。
++type ManifestReferenceSyntax struct {
++	// Image 是参考图的提示词写法，{n} 为参考图序号（从 1 起，只数参考图，不含首尾帧）。
++	Image string `json:"image,omitempty"`
++	// FirstFrame / LastFrame 是首帧、尾帧的提示词写法；为空时保留原始 @图片N。
++	FirstFrame string `json:"firstFrame,omitempty"`
++	LastFrame  string `json:"lastFrame,omitempty"`
++	// HonorFrameNodes 表示画布显式选择的首帧/尾帧节点（request.extra.videoStartFrameNodeId、
++	// videoEndFrameNodeId）优先于宿主的参考模式推断。画布在全能参考模式下会把首帧降级为参考图，
++	// 开启后首帧仍按首帧发送。
++	HonorFrameNodes bool `json:"honorFrameNodes,omitempty"`
++	// SingleImageIsFirstFrame 表示没有任何首尾帧时，唯一一张图作为首帧（图生视频）。
++	SingleImageIsFirstFrame bool `json:"singleImageIsFirstFrame,omitempty"`
++}
++
++const (
++	roleFirstFrame = "first_frame"
++	roleLastFrame  = "last_frame"
++	roleReference  = "reference_image"
++)
++
++// 宿主在 request.extra 中传递的首尾帧节点 ID，与 canvas 元数据字段同名。
++const (
++	extraStartFrameNodeID = "videoStartFrameNodeId"
++	extraEndFrameNodeID   = "videoEndFrameNodeId"
++)
++
++var canvasImageMention = regexp.MustCompile(`@图片(\d+)`)
++
++func validateReferenceSyntax(syntax *ManifestReferenceSyntax) error {
++	if syntax == nil {
++		return nil
++	}
++	for name, value := range map[string]string{"image": syntax.Image, "firstFrame": syntax.FirstFrame, "lastFrame": syntax.LastFrame} {
++		if len(value) > 64 || strings.ContainsAny(value, "\r\n") {
++			return fmt.Errorf("%s must be a single line of at most 64 bytes", name)
++		}
++	}
++	if syntax.Image != "" && !strings.Contains(syntax.Image, "{n}") {
++		return fmt.Errorf("image template must contain {n}")
++	}
++	return nil
++}
++
++func isReferenceRole(role string) bool {
++	switch role {
++	case roleReference, "subject_reference", "style_reference":
++		return true
++	}
++	return false
++}
++
++// applyReferenceSyntax 返回一份新请求：每张图都有明确角色，提示词里的 @图片N 已按上游写法改写。
++// 不修改调用方的请求，图片顺序保持不变。
++func applyReferenceSyntax(syntax *ManifestReferenceSyntax, request GenerationRequest) (GenerationRequest, error) {
++	if syntax == nil || len(request.Images) == 0 {
++		return request, nil
++	}
++	images := append([]MediaReference(nil), request.Images...)
++	// 编号按连线顺序（Order）；Order 相同时保持传入顺序。
++	positions := make([]int, len(images))
++	for index := range positions {
++		positions[index] = index
++	}
++	sort.SliceStable(positions, func(i, j int) bool { return images[positions[i]].Order < images[positions[j]].Order })
++
++	if syntax.HonorFrameNodes {
++		startID := stringExtra(request, extraStartFrameNodeID)
++		endID := stringExtra(request, extraEndFrameNodeID)
++		for index := range images {
++			switch id := images[index].ID; {
++			case id != "" && id == startID:
++				images[index].Role = roleFirstFrame
++			case id != "" && id == endID:
++				images[index].Role = roleLastFrame
++			}
++		}
++	}
++	if syntax.SingleImageIsFirstFrame && len(images) == 1 && !hasFrameRole(images) && request.Operation != "reference_to_video" {
++		images[0].Role = roleFirstFrame
++	}
++	for index := range images {
++		if role := strings.TrimSpace(images[index].Role); role != roleFirstFrame && role != roleLastFrame && !isReferenceRole(role) {
++			images[index].Role = roleReference
++		}
++	}
++
++	// 画布编号按原始连接位置（Order+1）；调用方没有填写不重复的 Order 时退回到传入位置。
++	distinct := make(map[int]bool, len(images))
++	for _, image := range images {
++		distinct[image.Order] = true
++	}
++	labelOf := func(index int) int {
++		if len(distinct) == len(images) {
++			return images[index].Order + 1
++		}
++		return index + 1
++	}
++	tokens := make(map[int]string, len(images))
++	referenceNumber := 0
++	for _, index := range positions {
++		role := strings.TrimSpace(images[index].Role)
++		switch {
++		case role == roleFirstFrame:
++			tokens[labelOf(index)] = syntax.FirstFrame
++		case role == roleLastFrame:
++			tokens[labelOf(index)] = syntax.LastFrame
++		case isReferenceRole(role):
++			referenceNumber++
++			if syntax.Image != "" {
++				tokens[labelOf(index)] = strings.ReplaceAll(syntax.Image, "{n}", strconv.Itoa(referenceNumber))
++			}
++		}
++	}
++	request.Images = images
++	request.Prompt = canvasImageMention.ReplaceAllStringFunc(request.Prompt, func(mention string) string {
++		number, err := strconv.Atoi(canvasImageMention.FindStringSubmatch(mention)[1])
++		if err != nil || tokens[number] == "" {
++			return mention
++		}
++		return tokens[number]
++	})
++	return request, nil
++}
++
++func hasFrameRole(images []MediaReference) bool {
++	for _, image := range images {
++		if role := strings.TrimSpace(image.Role); role == roleFirstFrame || role == roleLastFrame {
++			return true
++		}
++	}
++	return false
++}
++
++func stringExtra(request GenerationRequest, key string) string {
++	value, _ := request.Extra[key].(string)
++	return strings.TrimSpace(value)
++}
+diff --git a/backend/internal/protocol/types.go b/backend/internal/protocol/types.go
+index 562550e..e280df2 100644
+--- a/backend/internal/protocol/types.go
++++ b/backend/internal/protocol/types.go
+@@ -204,6 +204,7 @@ type Metadata struct {
+ 	// IdempotentCreate 表示 create 以宿主幂等键作为上游任务 ID，同一键重复提交不会重复扣费，可安全重试。
+ 	IdempotentCreate  bool   `json:"-"`
+ 	UnavailableReason string `json:"-"`
++	ReferenceSyntax   *ManifestReferenceSyntax `json:"-"`
+ 	// Kind 区分生成类与处理类 provider；处理类以输入媒体为主体，不要求 prompt。
+ 	Kind ProviderKind `json:"kind,omitempty"`
+ 	// TextWire / AgentWire 是 create / agent 声明路径对应的宿主已知文本线格式（见 textwire.go），
+@@ -403,6 +404,7 @@ type ManifestProvider struct {
+ 	Result                  *ManifestOperation     `json:"result,omitempty"`
+ 	Response                ManifestResponse       `json:"response"`
+ 	AgentResponse           *ManifestAgentResponse `json:"agentResponse,omitempty"`
++	ReferenceSyntax         *ManifestReferenceSyntax `json:"referenceSyntax,omitempty"`
+ }
+ 
+ type ManifestAuth struct {
+diff --git a/backend/internal/protocol/vgenv_video_test.go b/backend/internal/protocol/vgenv_video_test.go
+new file mode 100644
+index 0000000..543c471
+--- /dev/null
++++ b/backend/internal/protocol/vgenv_video_test.go
+@@ -0,0 +1,324 @@
++package protocol
++
++import (
++	"context"
++	"reflect"
++	"strings"
++	"testing"
++)
++
++func vgenvVideoAdapter(t *testing.T) Adapter {
++	t.Helper()
++	return officialPackageAdapter(t, "vgenv-video.yingce-plugin", "vgenv-video")
++}
++
++func TestVgenvVideoCreateTextToVideo(t *testing.T) {
++	adapter := vgenvVideoAdapter(t)
++	request := GenerationRequest{
++		Model:       "base:fast",
++		Prompt:      "动漫少女在樱花树下微笑，阳光明媚，微风吹拂",
++		Duration:    5,
++		AspectRatio: "9:16",
++		Resolution:  "768p",
++		Extra: map[string]any{
++			"idempotencyKey": "vgenv-test-key-123",
++		},
++	}
++	spec, err := adapter.BuildCreate(context.Background(), RequestContext{
++		BaseURL: "https://api.vgenv.com",
++		Request: request,
++	})
++	if err != nil {
++		t.Fatalf("BuildCreate failed: %v", err)
++	}
++	if spec.Method != "POST" || spec.Path != "/v3/videos" || spec.Headers["Idempotency-Key"] != "vgenv-test-key-123" {
++		t.Fatalf("spec metadata mismatch: %#v", spec)
++	}
++	body := manifestTestBody(t, spec)
++	want := map[string]any{
++		"model":        "base",
++		"tier":         "fast",
++		"prompt":       "动漫少女在樱花树下微笑，阳光明媚，微风吹拂",
++		"duration":     float64(5),
++		"resolution":   "768p",
++		"aspect_ratio": "9:16",
++	}
++	if !reflect.DeepEqual(body, want) {
++		t.Fatalf("body = %#v, want %#v", body, want)
++	}
++}
++
++func TestVgenvVideoCreateFirstAndLastFrame(t *testing.T) {
++	adapter := vgenvVideoAdapter(t)
++	request := GenerationRequest{
++		Model:       "cinematic:standard",
++		Prompt:      "镜头从 @图片1 的特写平滑推移过渡到 @图片2 的全景画面",
++		Duration:    6,
++		AspectRatio: "16:9",
++		Resolution:  "768p",
++		Images: []MediaReference{
++			{ID: "node-1", Kind: "image", Role: "first_frame", URL: "https://example.com/first.png", Order: 0},
++			{ID: "node-2", Kind: "image", Role: "last_frame", URL: "https://example.com/last.png", Order: 1},
++		},
++		Extra: map[string]any{
++			"idempotencyKey": "key-frames-456",
++		},
++	}
++	spec, err := adapter.BuildCreate(context.Background(), RequestContext{
++		BaseURL: "https://api.vgenv.com",
++		Request: request,
++	})
++	if err != nil {
++		t.Fatalf("BuildCreate failed: %v", err)
++	}
++	body := manifestTestBody(t, spec)
++	expectedPrompt := "镜头从 [First frame] 的特写平滑推移过渡到 [Last frame] 的全景画面"
++	if body["prompt"] != expectedPrompt {
++		t.Fatalf("prompt = %q, want %q", body["prompt"], expectedPrompt)
++	}
++	frameImages, ok := body["frame_images"].([]any)
++	if !ok || len(frameImages) != 2 {
++		t.Fatalf("frame_images = %#v, want 2 items", body["frame_images"])
++	}
++	first := frameImages[0].(map[string]any)
++	if first["frame_type"] != "first_frame" || first["image_url"].(map[string]any)["url"] != "https://example.com/first.png" {
++		t.Fatalf("first frame mismatch: %#v", first)
++	}
++	last := frameImages[1].(map[string]any)
++	if last["frame_type"] != "last_frame" || last["image_url"].(map[string]any)["url"] != "https://example.com/last.png" {
++		t.Fatalf("last frame mismatch: %#v", last)
++	}
++	if _, exists := body["reference_images"]; exists {
++		t.Fatalf("reference_images should not exist in frame_images mode: %#v", body["reference_images"])
++	}
++}
++
++func TestVgenvVideoCreateReferenceImages(t *testing.T) {
++	adapter := vgenvVideoAdapter(t)
++	request := GenerationRequest{
++		Model:       "base:fast",
++		Prompt:      "保持主角 @图片1 的发型和服饰，场景参考 @图片2 的夜市街道氛围",
++		Duration:    5,
++		AspectRatio: "9:16",
++		Resolution:  "768p",
++		Images: []MediaReference{
++			{ID: "char-1", Kind: "image", Role: "reference_image", URL: "https://example.com/char.png", Order: 0},
++			{ID: "scene-1", Kind: "image", Role: "reference_image", URL: "https://example.com/scene.png", Order: 1},
++		},
++		Extra: map[string]any{
++			"idempotencyKey": "key-ref-789",
++		},
++	}
++	spec, err := adapter.BuildCreate(context.Background(), RequestContext{
++		BaseURL: "https://api.vgenv.com",
++		Request: request,
++	})
++	if err != nil {
++		t.Fatalf("BuildCreate failed: %v", err)
++	}
++	body := manifestTestBody(t, spec)
++	expectedPrompt := "保持主角 <Picture 1> 的发型和服饰，场景参考 <Picture 2> 的夜市街道氛围"
++	if body["prompt"] != expectedPrompt {
++		t.Fatalf("prompt = %q, want %q", body["prompt"], expectedPrompt)
++	}
++	refImages, ok := body["reference_images"].([]any)
++	if !ok || len(refImages) != 2 {
++		t.Fatalf("reference_images = %#v, want 2 items", body["reference_images"])
++	}
++	ref1 := refImages[0].(map[string]any)
++	if ref1["image_url"].(map[string]any)["url"] != "https://example.com/char.png" {
++		t.Fatalf("reference image 1 mismatch: %#v", ref1)
++	}
++	ref2 := refImages[1].(map[string]any)
++	if ref2["image_url"].(map[string]any)["url"] != "https://example.com/scene.png" {
++		t.Fatalf("reference image 2 mismatch: %#v", ref2)
++	}
++	if _, exists := body["frame_images"]; exists {
++		t.Fatalf("frame_images should not exist when only references provided: %#v", body["frame_images"])
++	}
++}
++
++func TestVgenvVideoCreateFirstFrameAndReferenceImages(t *testing.T) {
++	adapter := vgenvVideoAdapter(t)
++	// 通过 videoStartFrameNodeId 显式指定 startFrameNodeId 为 node-start，另外一张为参考图
++	request := GenerationRequest{
++		Model:       "cinematic:fast",
++		Prompt:      "以 @图片1 为起始画面，画面中的人物动作和道具风格参考 @图片2",
++		Duration:    5,
++		AspectRatio: "16:9",
++		Resolution:  "768p",
++		Images: []MediaReference{
++			{ID: "node-start", Kind: "image", URL: "https://example.com/start.png", Order: 0},
++			{ID: "node-ref", Kind: "image", URL: "https://example.com/ref.png", Order: 1},
++		},
++		Extra: map[string]any{
++			"idempotencyKey":        "key-first-and-ref",
++			"videoStartFrameNodeId": "node-start",
++		},
++	}
++	spec, err := adapter.BuildCreate(context.Background(), RequestContext{
++		BaseURL: "https://api.vgenv.com",
++		Request: request,
++	})
++	if err != nil {
++		t.Fatalf("BuildCreate failed: %v", err)
++	}
++	body := manifestTestBody(t, spec)
++	expectedPrompt := "以 [First frame] 为起始画面，画面中的人物动作和道具风格参考 <Picture 1>"
++	if body["prompt"] != expectedPrompt {
++		t.Fatalf("prompt = %q, want %q", body["prompt"], expectedPrompt)
++	}
++	frameImages, ok := body["frame_images"].([]any)
++	if !ok || len(frameImages) != 1 {
++		t.Fatalf("frame_images = %#v, want 1 item", body["frame_images"])
++	}
++	first := frameImages[0].(map[string]any)
++	if first["frame_type"] != "first_frame" || first["image_url"].(map[string]any)["url"] != "https://example.com/start.png" {
++		t.Fatalf("first frame mismatch: %#v", first)
++	}
++	refImages, ok := body["reference_images"].([]any)
++	if !ok || len(refImages) != 1 {
++		t.Fatalf("reference_images = %#v, want 1 item", body["reference_images"])
++	}
++	ref1 := refImages[0].(map[string]any)
++	if ref1["image_url"].(map[string]any)["url"] != "https://example.com/ref.png" {
++		t.Fatalf("ref image mismatch: %#v", ref1)
++	}
++}
++
++func TestVgenvVideoPollAndResponse(t *testing.T) {
++	adapter := vgenvVideoAdapter(t)
++	pollSpec, err := adapter.BuildPoll(context.Background(), PollContext{
++		BaseURL: "https://api.vgenv.com",
++		TaskID:  "vid_task_123456",
++	})
++	if err != nil {
++		t.Fatalf("BuildPoll failed: %v", err)
++	}
++	if pollSpec.Method != "GET" || pollSpec.Path != "/v3/videos/vid_task_123456" {
++		t.Fatalf("pollSpec = %#v", pollSpec)
++	}
++
++	rawResponse := `{
++		"id": "vid_task_123456",
++		"status": "succeeded",
++		"output": {
++			"url": "https://cdn.vgenv.com/videos/output-123456.mp4"
++		},
++		"price": {
++			"currency": "USD",
++			"amount_micros": 50000
++		}
++	}`
++	state, err := adapter.ParsePoll(context.Background(), PollContext{
++		TaskID: "vid_task_123456",
++	}, []byte(rawResponse))
++	if err != nil {
++		t.Fatalf("ParsePoll failed: %v", err)
++	}
++	if state.Status != StatusSucceeded || state.TaskID != "vid_task_123456" {
++		t.Fatalf("state metadata mismatch: %#v", state)
++	}
++	if state.Result == nil || len(state.Result.Videos) != 1 || state.Result.Videos[0].URL != "https://cdn.vgenv.com/videos/output-123456.mp4" {
++		t.Fatalf("state.Result.Videos = %#v", state.Result)
++	}
++	if !state.Result.Videos[0].Ephemeral {
++		t.Fatalf("video should be ephemeral")
++	}
++}
++
++func TestVgenvVideoValidations(t *testing.T) {
++	adapter := vgenvVideoAdapter(t)
++	// 尾帧不能与参考图同时使用
++	reqInvalid := GenerationRequest{
++		Model:       "base:fast",
++		Prompt:      "test prompt",
++		Duration:    5,
++		AspectRatio: "16:9",
++		Resolution:  "768p",
++		Images: []MediaReference{
++			{ID: "img-1", Kind: "image", Role: "last_frame", URL: "https://example.com/last.png"},
++			{ID: "img-2", Kind: "image", Role: "reference_image", URL: "https://example.com/ref.png"},
++		},
++	}
++	_, err := adapter.BuildCreate(context.Background(), RequestContext{
++		BaseURL: "https://api.vgenv.com",
++		Request: reqInvalid,
++	})
++	if err == nil || !strings.Contains(err.Error(), "尾帧不能与参考图同时使用") {
++		t.Fatalf("expected error about last_frame and reference conflict, got: %v", err)
++	}
++
++	// Origin 模型不支持首帧+参考图
++	reqOrigin := GenerationRequest{
++		Model:       "origin:fast",
++		Prompt:      "test origin",
++		Duration:    5,
++		AspectRatio: "16:9",
++		Resolution:  "768p",
++		Images: []MediaReference{
++			{ID: "img-1", Kind: "image", Role: "first_frame", URL: "https://example.com/first.png"},
++			{ID: "img-2", Kind: "image", Role: "reference_image", URL: "https://example.com/ref.png"},
++		},
++	}
++	_, err = adapter.BuildCreate(context.Background(), RequestContext{
++		BaseURL: "https://api.vgenv.com",
++		Request: reqOrigin,
++	})
++	if err == nil || !strings.Contains(err.Error(), "Origin 不支持“首帧 + 参考图”") {
++		t.Fatalf("expected error about Origin not supporting first frame + reference, got: %v", err)
++	}
++
++	// 提示词小于 5 个字符
++	reqShortPrompt := GenerationRequest{
++		Model:       "base:fast",
++		Prompt:      "跳起来",
++		Duration:    5,
++		AspectRatio: "16:9",
++		Resolution:  "768p",
++	}
++	_, err = adapter.BuildCreate(context.Background(), RequestContext{
++		BaseURL: "https://api.vgenv.com",
++		Request: reqShortPrompt,
++	})
++	if err == nil || !strings.Contains(err.Error(), "提示词至少需要 5 个字符") {
++		t.Fatalf("expected error about prompt length, got: %v", err)
++	}
++}
++
++func TestVgenvVideoSingleImageReferenceOperation(t *testing.T) {
++	adapter := vgenvVideoAdapter(t)
++	request := GenerationRequest{
++		Model:       "base:fast",
++		Prompt:      "主角保持 @图片1 的动漫形象，在海滩漫步",
++		Duration:    5,
++		AspectRatio: "9:16",
++		Resolution:  "768p",
++		Operation:   "reference_to_video",
++		Images: []MediaReference{
++			{ID: "char-1", Kind: "image", URL: "https://example.com/char.png", Order: 0},
++		},
++		Extra: map[string]any{
++			"idempotencyKey": "key-single-ref",
++		},
++	}
++	spec, err := adapter.BuildCreate(context.Background(), RequestContext{
++		BaseURL: "https://api.vgenv.com",
++		Request: request,
++	})
++	if err != nil {
++		t.Fatalf("BuildCreate failed: %v", err)
++	}
++	body := manifestTestBody(t, spec)
++	expectedPrompt := "主角保持 <Picture 1> 的动漫形象，在海滩漫步"
++	if body["prompt"] != expectedPrompt {
++		t.Fatalf("prompt = %q, want %q", body["prompt"], expectedPrompt)
++	}
++	refImages, ok := body["reference_images"].([]any)
++	if !ok || len(refImages) != 1 {
++		t.Fatalf("reference_images = %#v, want 1 item", body["reference_images"])
++	}
++	if _, exists := body["frame_images"]; exists {
++		t.Fatalf("frame_images should not exist when operation is reference_to_video")
++	}
++}
+diff --git a/plugin-packages/generate-catalog.mjs b/plugin-packages/generate-catalog.mjs
+index 1974d8a..4b4781b 100644
+--- a/plugin-packages/generate-catalog.mjs
++++ b/plugin-packages/generate-catalog.mjs
+@@ -738,6 +738,70 @@ add({
+   })
+ });
+ 
++// vgenv V3 视频：模型 ID 写成 "<model>:<tier>"（如 base:fast），model 取 base / cinematic / origin，
++// tier 取 fast / standard / enhanced / quality；省略档位时用 fast。官方 OpenAPI：https://api.vgenv.com/docs-json
++// 图片三种互斥形态：reference_images（1–9 张，全能参考）、frame_images（首帧/尾帧/首尾帧）、
++// 首帧 + 参考图（首帧放 frame_images，参考图放 reference_images，仅 Base/Cinematic 且无尾帧）。
++// 参考视频与参考音频必须先走三步素材上传，声明式 upload 只支持单请求，因此本插件只接图片。
++const vgenvModel = { $at: [split(ref("request.model"), ":"), 0] };
++const vgenvTier = coalesce({ $at: [split(ref("request.model"), ":"), 1] }, "fast");
++const vgenvFirstFrames = mediaWithRoles("request.images", ["first_frame"]);
++const vgenvLastFrames = mediaWithRoles("request.images", ["last_frame"]);
++const vgenvReferenceImages = mediaWithRoles("request.images", ["reference_image", "subject_reference", "style_reference", ""]);
++const vgenvImage = (media) => ({ type: "image_url", image_url: { url: ref(`${media}.value`) } });
++const vgenvFrame = (type) => (path) => map(path, "media", { ...vgenvImage("media"), frame_type: type });
++
++add({
++  id: "vgenv-video", providerId: "vgenv-video", name: "vgenv Video", vendor: "vgenv", capability: "video",
++  description: "vgenv V3 异步视频接口：文生视频、首帧、尾帧、首尾帧、全能参考（最多 9 张图）与首帧 + 参考图。",
++  readmeIntro: "vgenv 官方声明式视频协议插件（V3，Base / Cinematic / Origin），支持文生视频、首帧、尾帧、首尾帧、全能参考和首帧 + 参考图；模型 ID 写成 `<model>:<tier>`。",
++  baseUrl: "https://api.vgenv.com", auth: bearer, params: videoParams,
++  requiresPublicMediaUrls: false, detachedPolling: true, idempotentCreate: true,
++  referenceSyntax: { image: "<Picture {n}>", firstFrame: "[First frame]", lastFrame: "[Last frame]", honorFrameNodes: true, singleImageIsFirstFrame: true },
++  validations: [
++    { assert: { $gte: [len(trim(ref("request.prompt"))), 5] }, message: "vgenv 提示词至少需要 5 个字符，请补充动作、场景或角色描述" },
++    { assert: { $in: [vgenvModel, ["base", "cinematic", "origin"]] }, message: "vgenv 模型 ID 必须写成 <model>:<tier>，model 为 base、cinematic 或 origin" },
++    { assert: { $in: [vgenvTier, ["fast", "standard", "enhanced", "quality"]] }, message: "vgenv 档位必须是 fast、standard、enhanced 或 quality" },
++    { assert: { $or: [eq(ref("request.duration"), 0), { $and: [gte(ref("request.duration"), 2), lte(ref("request.duration"), 15)] }] }, message: "vgenv 视频时长应为 2–15 秒整数（480p 为 4–15 秒）" },
++    { assert: { $in: [lower(trim(coalesce(ref("request.resolution"), "480p"))), ["480p", "768p"]] }, message: "vgenv 分辨率只支持 480p 或 768p" },
++    { assert: { $in: [coalesce(trim(ref("request.aspectRatio")), "9:16"), ["9:16", "2:3", "3:4", "1:1", "4:3", "3:2", "16:9", "21:9"]] }, message: "vgenv 不支持该画幅比例" },
++    { assert: { $lte: [len(vgenvReferenceImages), 9] }, message: "vgenv 最多支持 9 张参考图" },
++    { assert: { $lte: [len(vgenvFirstFrames), 1] }, message: "vgenv 首帧最多 1 张" },
++    { assert: { $lte: [len(vgenvLastFrames), 1] }, message: "vgenv 尾帧最多 1 张" },
++    { assert: eq(len(ref("request.videos")), 0), message: "vgenv 参考视频需要先上传为素材，当前插件暂不支持，请移除参考视频" },
++    { assert: eq(len(ref("request.audios")), 0), message: "vgenv 参考音频需要先上传为素材，当前插件暂不支持，请移除参考音频" },
++    { assert: { $not: { $and: [gt(len(vgenvLastFrames), 0), gt(len(vgenvReferenceImages), 0)] } }, message: "vgenv 尾帧不能与参考图同时使用；请改用“首帧 + 参考图”，或去掉参考图" },
++    { assert: { $or: [ne(vgenvModel, "origin"), eq(len(vgenvReferenceImages), 0), eq(len(vgenvFirstFrames), 0)] }, message: "vgenv Origin 不支持“首帧 + 参考图”，请改用 Base 或 Cinematic" }
++  ],
++  create: jsonCreate("/v3/videos", {
++    model: vgenvModel, tier: vgenvTier, prompt: ref("request.prompt"),
++    duration: omit(conditional(gt(ref("request.duration"), 0), ref("request.duration"), null)),
++    resolution: omit(lower(trim(ref("request.resolution")))),
++    aspect_ratio: omit(trim(ref("request.aspectRatio"))),
++    seed: omit(ref("request.providerOptions.vgenv-video.seed")),
++    prompt_optimization: omit(conditional(ref("request.providerOptions.vgenv-video.prompt_optimization"), { mode: ref("request.providerOptions.vgenv-video.prompt_optimization") })),
++    combat_enhancement: omit(conditional(ref("request.providerOptions.vgenv-video.combat_enhancement"), true)),
++    motion_speed: omit(conditional(ref("request.providerOptions.vgenv-video.combat_enhancement"), ref("request.providerOptions.vgenv-video.motion_speed"))),
++    upscale: omit(conditional(eq(ref("request.providerOptions.vgenv-video.upscale"), "2x"), "2x")),
++    frame_images: omit({ $concatArrays: [vgenvFrame("first_frame")(vgenvFirstFrames), vgenvFrame("last_frame")(vgenvLastFrames)] }),
++    reference_images: omit(map(vgenvReferenceImages, "media", vgenvImage("media")))
++  }, { headers: { "Idempotency-Key": ref("request.extra.idempotencyKey") } }),
++  poll: { method: "GET", path: "/v3/videos/{{taskId}}" },
++  cancel: { method: "DELETE", path: "/v3/videos/{{taskId}}" },
++  response: {
++    taskId: coalesce(ref("response.id"), ref("taskId")),
++    status: coalesce(ref("response.status"), "queued"),
++    message: coalesce(ref("response.error.message"), ref("response.message")),
++    stage: conditional(eq(ref("response.status"), "preparing"), "准备素材与审核提示词"),
++    queueAhead: ref("response.queue_position"),
++    videos: ref("response.output.url"),
++    usage: omit({ priceCurrency: ref("response.price.currency"), priceAmountMicros: ref("response.price.amount_micros") }),
++    errorPaths: ["error.code"],
++    resultEphemeral: true
++  },
++  notes: "模型 ID 写成 <model>:<tier>。创建返回 HTTP 202，轮询 GET /v3/videos/{id}，状态 preparing/queued/running 为进行中，succeeded 取 output.url（签名地址 24 小时有效，宿主立即下载转存），failed/cancelled 为终态；只有 preparing/queued 可取消。Idempotency-Key 由宿主任务提交键提供，同一键重试不会重复冻结余额。图片只接受 JPEG/PNG/WebP 公网 HTTPS 地址或 Data URL，单张不超过 5 MiB。"
++});
++
+ // Agnes 图像是同步端点，文生图与图生图共用 POST /v1/images/generations：
+ // 不传 image 为文生图，传 image 为图生图或多图合成。官方参数表只承认
+ // model、prompt、size（必填，档位 1K/2K/3K/4K 或 WxH 精确尺寸）、ratio、image、
+@@ -1333,6 +1397,9 @@ function manifestFor(spec) {
+         scopes,
+         baseUrl: spec.baseUrl,
+         requiresPublicMediaUrls: spec.requiresPublicMediaUrls === true,
++        ...(spec.detachedPolling ? { detachedPolling: true } : {}),
++        ...(spec.idempotentCreate ? { idempotentCreate: true } : {}),
++        ...(spec.referenceSyntax ? { referenceSyntax: spec.referenceSyntax } : {}),
+         auth: spec.auth,
+         ...(spec.imageParameters ? { imageParameters: spec.imageParameters } : {}),
+         parameters: parameters(spec.params),
+diff --git a/plugin-packages/vgenv-video.yingce-plugin b/plugin-packages/vgenv-video.yingce-plugin
+new file mode 100644
+index 0000000000000000000000000000000000000000..637d0dd495011525c6763563ae16a4179387c968
+GIT binary patch
+literal 13715
+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
+Ag#Z8m
+
+literal 0
+HcmV?d00001
+
+diff --git a/plugin-packages/vgenv-video/README.md b/plugin-packages/vgenv-video/README.md
+new file mode 100644
+index 0000000..b1b2df3
+--- /dev/null
++++ b/plugin-packages/vgenv-video/README.md
+@@ -0,0 +1,7 @@
++# vgenv Video
++
++vgenv 官方声明式视频协议插件（V3，Base / Cinematic / Origin），支持文生视频、首帧、尾帧、首尾帧、全能参考和首帧 + 参考图；模型 ID 写成 `<model>:<tier>`。
++
++后端从生成的 `vgenv-video.yingce-plugin` 包加载，不依赖系统内置 `host:` 适配器。
++
++完整接口见 [docs/interface.md](docs/interface.md)。
+diff --git a/plugin-packages/vgenv-video/docs/interface.md b/plugin-packages/vgenv-video/docs/interface.md
+new file mode 100644
+index 0000000..ac333d4
+--- /dev/null
++++ b/plugin-packages/vgenv-video/docs/interface.md
+@@ -0,0 +1,987 @@
++# vgenv Video 接口字段
++
++## 协议身份
++
++- 插件 ID：`vgenv-video`。
++- Provider ID：`vgenv-video`。
++- 能力：`video`。
++- 默认 Base URL：`https://api.vgenv.com`。
++- 鉴权驱动：`bearer`。
++- 创建：`POST /v3/videos`。
++- 查询：`GET /v3/videos/{{taskId}}`。
++- 取消：`DELETE /v3/videos/{{taskId}}`。
++
++## 配置字段
++
++| 字段 | 类型 | 必填 | 含义 |
++| --- | --- | --- | --- |
++| `apiKey` | secret | 是 | API Key |
++
++## 统一字段映射
++
++| 统一字段 | 类型 | 必填 | 上游映射 | 说明 |
++| --- | --- | --- | --- | --- |
++| `model` | string | 是 | `model` | 视频模型 ID。 |
++| `prompt` | string | 是 | `prompt/content/input` | 视频提示词。 |
++| `images` | media[] | 否 | `first/last/reference image` | 显式 role 图片输入。 |
++| `videos` | media[] | 否 | `reference video` | 参考视频。 |
++| `audios` | media[] | 否 | `reference audio/voice` | 参考音频或音色。 |
++| `duration` | integer | 否 | `duration/seconds` | 时长秒数。 |
++| `aspectRatio` | string | 否 | `ratio/aspect_ratio/size` | 画幅比例或尺寸。 |
++| `resolution` | string | 否 | `resolution` | 分辨率档位。 |
++| `generateAudio` | boolean | 否 | `generate_audio` | 是否生成音频。 |
++| `watermark` | boolean | 否 | `watermark` | 水印开关。 |
++| `providerOptions` | object | 否 | `provider-specific fields` | 插件命名空间内的厂商扩展字段。 |
++
++## 上游请求模板逐字段清单
++
++下表由插件请求模板生成，覆盖 body、query、headers 和 multipart 文件声明中的每个字段。
++
++| 上游位置 | 值或转换表达式 |
++| --- | --- |
++| `create.method` | `"POST"` |
++| `create.path` | `"/v3/videos"` |
++| `create.contentType` | `"application/json"` |
++| `create.body.model` | `{"$at":[{"$split":[{"$ref":"request.model"},":"]},0]}` |
++| `create.body.tier` | `{"$coalesce":[{"$at":[{"$split":[{"$ref":"request.model"},":"]},1]},"fast"]}` |
++| `create.body.prompt` | `{"$ref":"request.prompt"}` |
++| `create.body.duration` | `{"$omitEmpty":{"$if":{"condition":{"$gt":[{"$ref":"request.duration"},0]},"then":{"$ref":"request.duration"},"else":null}}}` |
++| `create.body.resolution` | `{"$omitEmpty":{"$lower":{"$trim":{"$ref":"request.resolution"}}}}` |
++| `create.body.aspect_ratio` | `{"$omitEmpty":{"$trim":{"$ref":"request.aspectRatio"}}}` |
++| `create.body.seed` | `{"$omitEmpty":{"$ref":"request.providerOptions.vgenv-video.seed"}}` |
++| `create.body.prompt_optimization` | `{"$omitEmpty":{"$if":{"condition":{"$ref":"request.providerOptions.vgenv-video.prompt_optimization"},"then":{"mode":{"$ref":"request.providerOptions.vgenv-video.prompt_optimization"}},"else":null}}}` |
++| `create.body.combat_enhancement` | `{"$omitEmpty":{"$if":{"condition":{"$ref":"request.providerOptions.vgenv-video.combat_enhancement"},"then":true,"else":null}}}` |
++| `create.body.motion_speed` | `{"$omitEmpty":{"$if":{"condition":{"$ref":"request.providerOptions.vgenv-video.combat_enhancement"},"then":{"$ref":"request.providerOptions.vgenv-video.motion_speed"},"else":null}}}` |
++| `create.body.upscale` | `{"$omitEmpty":{"$if":{"condition":{"$eq":[{"$ref":"request.providerOptions.vgenv-video.upscale"},"2x"]},"then":"2x","else":null}}}` |
++| `create.body.frame_images` | `{"$omitEmpty":{"$concatArrays":[{"$map":{"from":{"$filter":{"from":{"$sortByOrder":{"$ref":"request.images"}},"as":"media","where":{"$in":[{"$ref":"media.role"},["first_frame"]]}}},"as":"media","in":{"type":"image_url","image_url":{"url":{"$ref":"media.value"}},"frame_type":"first_frame"}}},{"$map":{"from":{"$filter":{"from":{"$sortByOrder":{"$ref":"request.images"}},"as":"media","where":{"$in":[{"$ref":"media.role"},["last_frame"]]}}},"as":"media","in":{"type":"image_url","image_url":{"url":{"$ref":"media.value"}},"frame_type":"last_frame"}}}]}}` |
++| `create.body.reference_images` | `{"$omitEmpty":{"$map":{"from":{"$filter":{"from":{"$sortByOrder":{"$ref":"request.images"}},"as":"media","where":{"$in":[{"$ref":"media.role"},["reference_image","subject_reference","style_reference",""]]}}},"as":"media","in":{"type":"image_url","image_url":{"url":{"$ref":"media.value"}}}}}}` |
++| `create.headers.Idempotency-Key` | `{"$ref":"request.extra.idempotencyKey"}` |
++| `poll.method` | `"GET"` |
++| `poll.path` | `"/v3/videos/{{taskId}}"` |
++| `cancel.method` | `"DELETE"` |
++| `cancel.path` | `"/v3/videos/{{taskId}}"` |
++
++## Provider 扩展键
++
++- `providerOptions.vgenv-video.combat_enhancement`
++- `providerOptions.vgenv-video.motion_speed`
++- `providerOptions.vgenv-video.prompt_optimization`
++- `providerOptions.vgenv-video.seed`
++- `providerOptions.vgenv-video.upscale`
++
++动态模型或工作流允许使用文档声明的完整 `parameters/input/extra_body` 对象；该对象是协议本身的开放 schema，不会被宿主裁剪。
++
++## 响应映射逐字段清单
++
++| 映射位置 | 上游路径或转换表达式 |
++| --- | --- |
++| `response.taskId` | `{"$coalesce":[{"$ref":"response.id"},{"$ref":"taskId"}]}` |
++| `response.status` | `{"$coalesce":[{"$ref":"response.status"},"queued"]}` |
++| `response.message` | `{"$coalesce":[{"$ref":"response.error.message"},{"$ref":"response.message"}]}` |
++| `response.stage` | `{"$if":{"condition":{"$eq":[{"$ref":"response.status"},"preparing"]},"then":"准备素材与审核提示词","else":null}}` |
++| `response.queueAhead` | `{"$ref":"response.queue_position"}` |
++| `response.videos` | `{"$ref":"response.output.url"}` |
++| `response.usage` | `{"$omitEmpty":{"priceCurrency":{"$ref":"response.price.currency"},"priceAmountMicros":{"$ref":"response.price.amount_micros"}}}` |
++| `response.errorPaths[0]` | `"error.code"` |
++| `response.resultEphemeral` | `true` |
++
++## 响应与错误
++
++插件把上游 task/status/text/media/usage 映射为统一结果。临时媒体 URL 标记为 ephemeral，由宿主立即下载持久化。HTTP 错误、业务 code 和 error object 保持失败语义，不包装成成功。
++
++## 兼容边界
++
++模型 ID 写成 <model>:<tier>。创建返回 HTTP 202，轮询 GET /v3/videos/{id}，状态 preparing/queued/running 为进行中，succeeded 取 output.url（签名地址 24 小时有效，宿主立即下载转存），failed/cancelled 为终态；只有 preparing/queued 可取消。Idempotency-Key 由宿主任务提交键提供，同一键重试不会重复冻结余额。图片只接受 JPEG/PNG/WebP 公网 HTTPS 地址或 Data URL，单张不超过 5 MiB。
++
++<!-- YINGCE_MANIFEST_CONTRACT_START -->
++## Manifest 完整接口定义
++
++以下 JSON 与插件包内实际 `manifest.json` 逐字段一致，覆盖插件身份、权限、配置、鉴权、参数、校验、创建、Agent、查询、取消、结果下载、响应和 Agent 响应映射。`documentation` 字段的值就是当前完整文档；为避免文档在自身内部无限递归，JSON 中仅用等义占位文本表示正文。
++
++```json
++{
++  "apiVersion": "yingce.plugin/v2",
++  "id": "vgenv-video",
++  "name": "vgenv Video",
++  "version": "2.0.0",
++  "author": "vgenv / 影策",
++  "description": "vgenv V3 异步视频接口：文生视频、首帧、尾帧、首尾帧、全能参考（最多 9 张图）与首帧 + 参考图。",
++  "documentation": "<当前插件的完整 documentation，由 README.md 与 docs/interface.md 拼接而成；为避免 JSON 递归，此处不重复展开正文。>",
++  "permissions": [
++    "generation.run",
++    "media.read"
++  ],
++  "configuration": {
++    "fields": [
++      {
++        "name": "apiKey",
++        "type": "secret",
++        "label": "API Key",
++        "required": true
++      }
++    ]
++  },
++  "contributes": {
++    "providers": [
++      {
++        "id": "vgenv-video",
++        "label": "vgenv Video",
++        "capabilities": [
++          "video"
++        ],
++        "scopes": [
++          "admin.system-channel",
++          "user.custom-channel",
++          "canvas",
++          "creation",
++          "agent"
++        ],
++        "baseUrl": "https://api.vgenv.com",
++        "requiresPublicMediaUrls": false,
++        "detachedPolling": true,
++        "idempotentCreate": true,
++        "referenceSyntax": {
++          "image": "<Picture {n}>",
++          "firstFrame": "[First frame]",
++          "lastFrame": "[Last frame]",
++          "honorFrameNodes": true,
++          "singleImageIsFirstFrame": true
++        },
++        "auth": {
++          "type": "bearer",
++          "field": "apiKey"
++        },
++        "parameters": [
++          {
++            "name": "model",
++            "type": "string",
++            "required": true,
++            "mapping": "model",
++            "description": "视频模型 ID。"
++          },
++          {
++            "name": "prompt",
++            "type": "string",
++            "required": true,
++            "mapping": "prompt/content/input",
++            "description": "视频提示词。"
++          },
++          {
++            "name": "images",
++            "type": "media[]",
++            "required": false,
++            "mapping": "first/last/reference image",
++            "description": "显式 role 图片输入。"
++          },
++          {
++            "name": "videos",
++            "type": "media[]",
++            "required": false,
++            "mapping": "reference video",
++            "description": "参考视频。"
++          },
++          {
++            "name": "audios",
++            "type": "media[]",
++            "required": false,
++            "mapping": "reference audio/voice",
++            "description": "参考音频或音色。"
++          },
++          {
++            "name": "duration",
++            "type": "integer",
++            "required": false,
++            "mapping": "duration/seconds",
++            "description": "时长秒数。"
++          },
++          {
++            "name": "aspectRatio",
++            "type": "string",
++            "required": false,
++            "mapping": "ratio/aspect_ratio/size",
++            "description": "画幅比例或尺寸。"
++          },
++          {
++            "name": "resolution",
++            "type": "string",
++            "required": false,
++            "mapping": "resolution",
++            "description": "分辨率档位。"
++          },
++          {
++            "name": "generateAudio",
++            "type": "boolean",
++            "required": false,
++            "mapping": "generate_audio",
++            "description": "是否生成音频。"
++          },
++          {
++            "name": "watermark",
++            "type": "boolean",
++            "required": false,
++            "mapping": "watermark",
++            "description": "水印开关。"
++          },
++          {
++            "name": "providerOptions",
++            "type": "object",
++            "required": false,
++            "mapping": "provider-specific fields",
++            "description": "插件命名空间内的厂商扩展字段。"
++          }
++        ],
++        "validations": [
++          {
++            "assert": {
++              "$gte": [
++                {
++                  "$len": {
++                    "$trim": {
++                      "$ref": "request.prompt"
++                    }
++                  }
++                },
++                5
++              ]
++            },
++            "message": "vgenv 提示词至少需要 5 个字符，请补充动作、场景或角色描述"
++          },
++          {
++            "assert": {
++              "$in": [
++                {
++                  "$at": [
++                    {
++                      "$split": [
++                        {
++                          "$ref": "request.model"
++                        },
++                        ":"
++                      ]
++                    },
++                    0
++                  ]
++                },
++                [
++                  "base",
++                  "cinematic",
++                  "origin"
++                ]
++              ]
++            },
++            "message": "vgenv 模型 ID 必须写成 <model>:<tier>，model 为 base、cinematic 或 origin"
++          },
++          {
++            "assert": {
++              "$in": [
++                {
++                  "$coalesce": [
++                    {
++                      "$at": [
++                        {
++                          "$split": [
++                            {
++                              "$ref": "request.model"
++                            },
++                            ":"
++                          ]
++                        },
++                        1
++                      ]
++                    },
++                    "fast"
++                  ]
++                },
++                [
++                  "fast",
++                  "standard",
++                  "enhanced",
++                  "quality"
++                ]
++              ]
++            },
++            "message": "vgenv 档位必须是 fast、standard、enhanced 或 quality"
++          },
++          {
++            "assert": {
++              "$or": [
++                {
++                  "$eq": [
++                    {
++                      "$ref": "request.duration"
++                    },
++                    0
++                  ]
++                },
++                {
++                  "$and": [
++                    {
++                      "$gte": [
++                        {
++                          "$ref": "request.duration"
++                        },
++                        2
++                      ]
++                    },
++                    {
++                      "$lte": [
++                        {
++                          "$ref": "request.duration"
++                        },
++                        15
++                      ]
++                    }
++                  ]
++                }
++              ]
++            },
++            "message": "vgenv 视频时长应为 2–15 秒整数（480p 为 4–15 秒）"
++          },
++          {
++            "assert": {
++              "$in": [
++                {
++                  "$lower": {
++                    "$trim": {
++                      "$coalesce": [
++                        {
++                          "$ref": "request.resolution"
++                        },
++                        "480p"
++                      ]
++                    }
++                  }
++                },
++                [
++                  "480p",
++                  "768p"
++                ]
++              ]
++            },
++            "message": "vgenv 分辨率只支持 480p 或 768p"
++          },
++          {
++            "assert": {
++              "$in": [
++                {
++                  "$coalesce": [
++                    {
++                      "$trim": {
++                        "$ref": "request.aspectRatio"
++                      }
++                    },
++                    "9:16"
++                  ]
++                },
++                [
++                  "9:16",
++                  "2:3",
++                  "3:4",
++                  "1:1",
++                  "4:3",
++                  "3:2",
++                  "16:9",
++                  "21:9"
++                ]
++              ]
++            },
++            "message": "vgenv 不支持该画幅比例"
++          },
++          {
++            "assert": {
++              "$lte": [
++                {
++                  "$len": {
++                    "$filter": {
++                      "from": {
++                        "$sortByOrder": {
++                          "$ref": "request.images"
++                        }
++                      },
++                      "as": "media",
++                      "where": {
++                        "$in": [
++                          {
++                            "$ref": "media.role"
++                          },
++                          [
++                            "reference_image",
++                            "subject_reference",
++                            "style_reference",
++                            ""
++                          ]
++                        ]
++                      }
++                    }
++                  }
++                },
++                9
++              ]
++            },
++            "message": "vgenv 最多支持 9 张参考图"
++          },
++          {
++            "assert": {
++              "$lte": [
++                {
++                  "$len": {
++                    "$filter": {
++                      "from": {
++                        "$sortByOrder": {
++                          "$ref": "request.images"
++                        }
++                      },
++                      "as": "media",
++                      "where": {
++                        "$in": [
++                          {
++                            "$ref": "media.role"
++                          },
++                          [
++                            "first_frame"
++                          ]
++                        ]
++                      }
++                    }
++                  }
++                },
++                1
++              ]
++            },
++            "message": "vgenv 首帧最多 1 张"
++          },
++          {
++            "assert": {
++              "$lte": [
++                {
++                  "$len": {
++                    "$filter": {
++                      "from": {
++                        "$sortByOrder": {
++                          "$ref": "request.images"
++                        }
++                      },
++                      "as": "media",
++                      "where": {
++                        "$in": [
++                          {
++                            "$ref": "media.role"
++                          },
++                          [
++                            "last_frame"
++                          ]
++                        ]
++                      }
++                    }
++                  }
++                },
++                1
++              ]
++            },
++            "message": "vgenv 尾帧最多 1 张"
++          },
++          {
++            "assert": {
++              "$eq": [
++                {
++                  "$len": {
++                    "$ref": "request.videos"
++                  }
++                },
++                0
++              ]
++            },
++            "message": "vgenv 参考视频需要先上传为素材，当前插件暂不支持，请移除参考视频"
++          },
++          {
++            "assert": {
++              "$eq": [
++                {
++                  "$len": {
++                    "$ref": "request.audios"
++                  }
++                },
++                0
++              ]
++            },
++            "message": "vgenv 参考音频需要先上传为素材，当前插件暂不支持，请移除参考音频"
++          },
++          {
++            "assert": {
++              "$not": {
++                "$and": [
++                  {
++                    "$gt": [
++                      {
++                        "$len": {
++                          "$filter": {
++                            "from": {
++                              "$sortByOrder": {
++                                "$ref": "request.images"
++                              }
++                            },
++                            "as": "media",
++                            "where": {
++                              "$in": [
++                                {
++                                  "$ref": "media.role"
++                                },
++                                [
++                                  "last_frame"
++                                ]
++                              ]
++                            }
++                          }
++                        }
++                      },
++                      0
++                    ]
++                  },
++                  {
++                    "$gt": [
++                      {
++                        "$len": {
++                          "$filter": {
++                            "from": {
++                              "$sortByOrder": {
++                                "$ref": "request.images"
++                              }
++                            },
++                            "as": "media",
++                            "where": {
++                              "$in": [
++                                {
++                                  "$ref": "media.role"
++                                },
++                                [
++                                  "reference_image",
++                                  "subject_reference",
++                                  "style_reference",
++                                  ""
++                                ]
++                              ]
++                            }
++                          }
++                        }
++                      },
++                      0
++                    ]
++                  }
++                ]
++              }
++            },
++            "message": "vgenv 尾帧不能与参考图同时使用；请改用“首帧 + 参考图”，或去掉参考图"
++          },
++          {
++            "assert": {
++              "$or": [
++                {
++                  "$ne": [
++                    {
++                      "$at": [
++                        {
++                          "$split": [
++                            {
++                              "$ref": "request.model"
++                            },
++                            ":"
++                          ]
++                        },
++                        0
++                      ]
++                    },
++                    "origin"
++                  ]
++                },
++                {
++                  "$eq": [
++                    {
++                      "$len": {
++                        "$filter": {
++                          "from": {
++                            "$sortByOrder": {
++                              "$ref": "request.images"
++                            }
++                          },
++                          "as": "media",
++                          "where": {
++                            "$in": [
++                              {
++                                "$ref": "media.role"
++                              },
++                              [
++                                "reference_image",
++                                "subject_reference",
++                                "style_reference",
++                                ""
++                              ]
++                            ]
++                          }
++                        }
++                      }
++                    },
++                    0
++                  ]
++                },
++                {
++                  "$eq": [
++                    {
++                      "$len": {
++                        "$filter": {
++                          "from": {
++                            "$sortByOrder": {
++                              "$ref": "request.images"
++                            }
++                          },
++                          "as": "media",
++                          "where": {
++                            "$in": [
++                              {
++                                "$ref": "media.role"
++                              },
++                              [
++                                "first_frame"
++                              ]
++                            ]
++                          }
++                        }
++                      }
++                    },
++                    0
++                  ]
++                }
++              ]
++            },
++            "message": "vgenv Origin 不支持“首帧 + 参考图”，请改用 Base 或 Cinematic"
++          }
++        ],
++        "create": {
++          "method": "POST",
++          "path": "/v3/videos",
++          "contentType": "application/json",
++          "body": {
++            "model": {
++              "$at": [
++                {
++                  "$split": [
++                    {
++                      "$ref": "request.model"
++                    },
++                    ":"
++                  ]
++                },
++                0
++              ]
++            },
++            "tier": {
++              "$coalesce": [
++                {
++                  "$at": [
++                    {
++                      "$split": [
++                        {
++                          "$ref": "request.model"
++                        },
++                        ":"
++                      ]
++                    },
++                    1
++                  ]
++                },
++                "fast"
++              ]
++            },
++            "prompt": {
++              "$ref": "request.prompt"
++            },
++            "duration": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$gt": [
++                      {
++                        "$ref": "request.duration"
++                      },
++                      0
++                    ]
++                  },
++                  "then": {
++                    "$ref": "request.duration"
++                  },
++                  "else": null
++                }
++              }
++            },
++            "resolution": {
++              "$omitEmpty": {
++                "$lower": {
++                  "$trim": {
++                    "$ref": "request.resolution"
++                  }
++                }
++              }
++            },
++            "aspect_ratio": {
++              "$omitEmpty": {
++                "$trim": {
++                  "$ref": "request.aspectRatio"
++                }
++              }
++            },
++            "seed": {
++              "$omitEmpty": {
++                "$ref": "request.providerOptions.vgenv-video.seed"
++              }
++            },
++            "prompt_optimization": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$ref": "request.providerOptions.vgenv-video.prompt_optimization"
++                  },
++                  "then": {
++                    "mode": {
++                      "$ref": "request.providerOptions.vgenv-video.prompt_optimization"
++                    }
++                  },
++                  "else": null
++                }
++              }
++            },
++            "combat_enhancement": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$ref": "request.providerOptions.vgenv-video.combat_enhancement"
++                  },
++                  "then": true,
++                  "else": null
++                }
++              }
++            },
++            "motion_speed": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$ref": "request.providerOptions.vgenv-video.combat_enhancement"
++                  },
++                  "then": {
++                    "$ref": "request.providerOptions.vgenv-video.motion_speed"
++                  },
++                  "else": null
++                }
++              }
++            },
++            "upscale": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$eq": [
++                      {
++                        "$ref": "request.providerOptions.vgenv-video.upscale"
++                      },
++                      "2x"
++                    ]
++                  },
++                  "then": "2x",
++                  "else": null
++                }
++              }
++            },
++            "frame_images": {
++              "$omitEmpty": {
++                "$concatArrays": [
++                  {
++                    "$map": {
++                      "from": {
++                        "$filter": {
++                          "from": {
++                            "$sortByOrder": {
++                              "$ref": "request.images"
++                            }
++                          },
++                          "as": "media",
++                          "where": {
++                            "$in": [
++                              {
++                                "$ref": "media.role"
++                              },
++                              [
++                                "first_frame"
++                              ]
++                            ]
++                          }
++                        }
++                      },
++                      "as": "media",
++                      "in": {
++                        "type": "image_url",
++                        "image_url": {
++                          "url": {
++                            "$ref": "media.value"
++                          }
++                        },
++                        "frame_type": "first_frame"
++                      }
++                    }
++                  },
++                  {
++                    "$map": {
++                      "from": {
++                        "$filter": {
++                          "from": {
++                            "$sortByOrder": {
++                              "$ref": "request.images"
++                            }
++                          },
++                          "as": "media",
++                          "where": {
++                            "$in": [
++                              {
++                                "$ref": "media.role"
++                              },
++                              [
++                                "last_frame"
++                              ]
++                            ]
++                          }
++                        }
++                      },
++                      "as": "media",
++                      "in": {
++                        "type": "image_url",
++                        "image_url": {
++                          "url": {
++                            "$ref": "media.value"
++                          }
++                        },
++                        "frame_type": "last_frame"
++                      }
++                    }
++                  }
++                ]
++              }
++            },
++            "reference_images": {
++              "$omitEmpty": {
++                "$map": {
++                  "from": {
++                    "$filter": {
++                      "from": {
++                        "$sortByOrder": {
++                          "$ref": "request.images"
++                        }
++                      },
++                      "as": "media",
++                      "where": {
++                        "$in": [
++                          {
++                            "$ref": "media.role"
++                          },
++                          [
++                            "reference_image",
++                            "subject_reference",
++                            "style_reference",
++                            ""
++                          ]
++                        ]
++                      }
++                    }
++                  },
++                  "as": "media",
++                  "in": {
++                    "type": "image_url",
++                    "image_url": {
++                      "url": {
++                        "$ref": "media.value"
++                      }
++                    }
++                  }
++                }
++              }
++            }
++          },
++          "headers": {
++            "Idempotency-Key": {
++              "$ref": "request.extra.idempotencyKey"
++            }
++          }
++        },
++        "poll": {
++          "method": "GET",
++          "path": "/v3/videos/{{taskId}}"
++        },
++        "cancel": {
++          "method": "DELETE",
++          "path": "/v3/videos/{{taskId}}"
++        },
++        "response": {
++          "taskId": {
++            "$coalesce": [
++              {
++                "$ref": "response.id"
++              },
++              {
++                "$ref": "taskId"
++              }
++            ]
++          },
++          "status": {
++            "$coalesce": [
++              {
++                "$ref": "response.status"
++              },
++              "queued"
++            ]
++          },
++          "message": {
++            "$coalesce": [
++              {
++                "$ref": "response.error.message"
++              },
++              {
++                "$ref": "response.message"
++              }
++            ]
++          },
++          "stage": {
++            "$if": {
++              "condition": {
++                "$eq": [
++                  {
++                    "$ref": "response.status"
++                  },
++                  "preparing"
++                ]
++              },
++              "then": "准备素材与审核提示词",
++              "else": null
++            }
++          },
++          "queueAhead": {
++            "$ref": "response.queue_position"
++          },
++          "videos": {
++            "$ref": "response.output.url"
++          },
++          "usage": {
++            "$omitEmpty": {
++              "priceCurrency": {
++                "$ref": "response.price.currency"
++              },
++              "priceAmountMicros": {
++                "$ref": "response.price.amount_micros"
++              }
++            }
++          },
++          "errorPaths": [
++            "error.code"
++          ],
++          "resultEphemeral": true
++        }
++      }
++    ]
++  }
++}
++```
++<!-- YINGCE_MANIFEST_CONTRACT_END -->
+diff --git a/plugin-packages/vgenv-video/manifest.json b/plugin-packages/vgenv-video/manifest.json
+new file mode 100644
+index 0000000..ac3128b
+--- /dev/null
++++ b/plugin-packages/vgenv-video/manifest.json
+@@ -0,0 +1,884 @@
++{
++  "apiVersion": "yingce.plugin/v2",
++  "id": "vgenv-video",
++  "name": "vgenv Video",
++  "version": "2.0.0",
++  "author": "vgenv / 影策",
++  "description": "vgenv V3 异步视频接口：文生视频、首帧、尾帧、首尾帧、全能参考（最多 9 张图）与首帧 + 参考图。",
++  "documentation": "# vgenv Video\n\nvgenv 官方声明式视频协议插件（V3，Base / Cinematic / Origin），支持文生视频、首帧、尾帧、首尾帧、全能参考和首帧 + 参考图；模型 ID 写成 `<model>:<tier>`。\n\n后端从生成的 `vgenv-video.yingce-plugin` 包加载，不依赖系统内置 `host:` 适配器。\n\n完整接口见 [docs/interface.md](docs/interface.md)。\n\n---\n\n# vgenv Video 接口字段\n\n## 协议身份\n\n- 插件 ID：`vgenv-video`。\n- Provider ID：`vgenv-video`。\n- 能力：`video`。\n- 默认 Base URL：`https://api.vgenv.com`。\n- 鉴权驱动：`bearer`。\n- 创建：`POST /v3/videos`。\n- 查询：`GET /v3/videos/{{taskId}}`。\n- 取消：`DELETE /v3/videos/{{taskId}}`。\n\n## 配置字段\n\n| 字段 | 类型 | 必填 | 含义 |\n| --- | --- | --- | --- |\n| `apiKey` | secret | 是 | API Key |\n\n## 统一字段映射\n\n| 统一字段 | 类型 | 必填 | 上游映射 | 说明 |\n| --- | --- | --- | --- | --- |\n| `model` | string | 是 | `model` | 视频模型 ID。 |\n| `prompt` | string | 是 | `prompt/content/input` | 视频提示词。 |\n| `images` | media[] | 否 | `first/last/reference image` | 显式 role 图片输入。 |\n| `videos` | media[] | 否 | `reference video` | 参考视频。 |\n| `audios` | media[] | 否 | `reference audio/voice` | 参考音频或音色。 |\n| `duration` | integer | 否 | `duration/seconds` | 时长秒数。 |\n| `aspectRatio` | string | 否 | `ratio/aspect_ratio/size` | 画幅比例或尺寸。 |\n| `resolution` | string | 否 | `resolution` | 分辨率档位。 |\n| `generateAudio` | boolean | 否 | `generate_audio` | 是否生成音频。 |\n| `watermark` | boolean | 否 | `watermark` | 水印开关。 |\n| `providerOptions` | object | 否 | `provider-specific fields` | 插件命名空间内的厂商扩展字段。 |\n\n## 上游请求模板逐字段清单\n\n下表由插件请求模板生成，覆盖 body、query、headers 和 multipart 文件声明中的每个字段。\n\n| 上游位置 | 值或转换表达式 |\n| --- | --- |\n| `create.method` | `\"POST\"` |\n| `create.path` | `\"/v3/videos\"` |\n| `create.contentType` | `\"application/json\"` |\n| `create.body.model` | `{\"$at\":[{\"$split\":[{\"$ref\":\"request.model\"},\":\"]},0]}` |\n| `create.body.tier` | `{\"$coalesce\":[{\"$at\":[{\"$split\":[{\"$ref\":\"request.model\"},\":\"]},1]},\"fast\"]}` |\n| `create.body.prompt` | `{\"$ref\":\"request.prompt\"}` |\n| `create.body.duration` | `{\"$omitEmpty\":{\"$if\":{\"condition\":{\"$gt\":[{\"$ref\":\"request.duration\"},0]},\"then\":{\"$ref\":\"request.duration\"},\"else\":null}}}` |\n| `create.body.resolution` | `{\"$omitEmpty\":{\"$lower\":{\"$trim\":{\"$ref\":\"request.resolution\"}}}}` |\n| `create.body.aspect_ratio` | `{\"$omitEmpty\":{\"$trim\":{\"$ref\":\"request.aspectRatio\"}}}` |\n| `create.body.seed` | `{\"$omitEmpty\":{\"$ref\":\"request.providerOptions.vgenv-video.seed\"}}` |\n| `create.body.prompt_optimization` | `{\"$omitEmpty\":{\"$if\":{\"condition\":{\"$ref\":\"request.providerOptions.vgenv-video.prompt_optimization\"},\"then\":{\"mode\":{\"$ref\":\"request.providerOptions.vgenv-video.prompt_optimization\"}},\"else\":null}}}` |\n| `create.body.combat_enhancement` | `{\"$omitEmpty\":{\"$if\":{\"condition\":{\"$ref\":\"request.providerOptions.vgenv-video.combat_enhancement\"},\"then\":true,\"else\":null}}}` |\n| `create.body.motion_speed` | `{\"$omitEmpty\":{\"$if\":{\"condition\":{\"$ref\":\"request.providerOptions.vgenv-video.combat_enhancement\"},\"then\":{\"$ref\":\"request.providerOptions.vgenv-video.motion_speed\"},\"else\":null}}}` |\n| `create.body.upscale` | `{\"$omitEmpty\":{\"$if\":{\"condition\":{\"$eq\":[{\"$ref\":\"request.providerOptions.vgenv-video.upscale\"},\"2x\"]},\"then\":\"2x\",\"else\":null}}}` |\n| `create.body.frame_images` | `{\"$omitEmpty\":{\"$concatArrays\":[{\"$map\":{\"from\":{\"$filter\":{\"from\":{\"$sortByOrder\":{\"$ref\":\"request.images\"}},\"as\":\"media\",\"where\":{\"$in\":[{\"$ref\":\"media.role\"},[\"first_frame\"]]}}},\"as\":\"media\",\"in\":{\"type\":\"image_url\",\"image_url\":{\"url\":{\"$ref\":\"media.value\"}},\"frame_type\":\"first_frame\"}}},{\"$map\":{\"from\":{\"$filter\":{\"from\":{\"$sortByOrder\":{\"$ref\":\"request.images\"}},\"as\":\"media\",\"where\":{\"$in\":[{\"$ref\":\"media.role\"},[\"last_frame\"]]}}},\"as\":\"media\",\"in\":{\"type\":\"image_url\",\"image_url\":{\"url\":{\"$ref\":\"media.value\"}},\"frame_type\":\"last_frame\"}}}]}}` |\n| `create.body.reference_images` | `{\"$omitEmpty\":{\"$map\":{\"from\":{\"$filter\":{\"from\":{\"$sortByOrder\":{\"$ref\":\"request.images\"}},\"as\":\"media\",\"where\":{\"$in\":[{\"$ref\":\"media.role\"},[\"reference_image\",\"subject_reference\",\"style_reference\",\"\"]]}}},\"as\":\"media\",\"in\":{\"type\":\"image_url\",\"image_url\":{\"url\":{\"$ref\":\"media.value\"}}}}}}` |\n| `create.headers.Idempotency-Key` | `{\"$ref\":\"request.extra.idempotencyKey\"}` |\n| `poll.method` | `\"GET\"` |\n| `poll.path` | `\"/v3/videos/{{taskId}}\"` |\n| `cancel.method` | `\"DELETE\"` |\n| `cancel.path` | `\"/v3/videos/{{taskId}}\"` |\n\n## Provider 扩展键\n\n- `providerOptions.vgenv-video.combat_enhancement`\n- `providerOptions.vgenv-video.motion_speed`\n- `providerOptions.vgenv-video.prompt_optimization`\n- `providerOptions.vgenv-video.seed`\n- `providerOptions.vgenv-video.upscale`\n\n动态模型或工作流允许使用文档声明的完整 `parameters/input/extra_body` 对象；该对象是协议本身的开放 schema，不会被宿主裁剪。\n\n## 响应映射逐字段清单\n\n| 映射位置 | 上游路径或转换表达式 |\n| --- | --- |\n| `response.taskId` | `{\"$coalesce\":[{\"$ref\":\"response.id\"},{\"$ref\":\"taskId\"}]}` |\n| `response.status` | `{\"$coalesce\":[{\"$ref\":\"response.status\"},\"queued\"]}` |\n| `response.message` | `{\"$coalesce\":[{\"$ref\":\"response.error.message\"},{\"$ref\":\"response.message\"}]}` |\n| `response.stage` | `{\"$if\":{\"condition\":{\"$eq\":[{\"$ref\":\"response.status\"},\"preparing\"]},\"then\":\"准备素材与审核提示词\",\"else\":null}}` |\n| `response.queueAhead` | `{\"$ref\":\"response.queue_position\"}` |\n| `response.videos` | `{\"$ref\":\"response.output.url\"}` |\n| `response.usage` | `{\"$omitEmpty\":{\"priceCurrency\":{\"$ref\":\"response.price.currency\"},\"priceAmountMicros\":{\"$ref\":\"response.price.amount_micros\"}}}` |\n| `response.errorPaths[0]` | `\"error.code\"` |\n| `response.resultEphemeral` | `true` |\n\n## 响应与错误\n\n插件把上游 task/status/text/media/usage 映射为统一结果。临时媒体 URL 标记为 ephemeral，由宿主立即下载持久化。HTTP 错误、业务 code 和 error object 保持失败语义，不包装成成功。\n\n## 兼容边界\n\n模型 ID 写成 <model>:<tier>。创建返回 HTTP 202，轮询 GET /v3/videos/{id}，状态 preparing/queued/running 为进行中，succeeded 取 output.url（签名地址 24 小时有效，宿主立即下载转存），failed/cancelled 为终态；只有 preparing/queued 可取消。Idempotency-Key 由宿主任务提交键提供，同一键重试不会重复冻结余额。图片只接受 JPEG/PNG/WebP 公网 HTTPS 地址或 Data URL，单张不超过 5 MiB。\n\n<!-- YINGCE_MANIFEST_CONTRACT_START -->\n## Manifest 完整接口定义\n\n以下 JSON 与插件包内实际 `manifest.json` 逐字段一致，覆盖插件身份、权限、配置、鉴权、参数、校验、创建、Agent、查询、取消、结果下载、响应和 Agent 响应映射。`documentation` 字段的值就是当前完整文档；为避免文档在自身内部无限递归，JSON 中仅用等义占位文本表示正文。\n\n```json\n{\n  \"apiVersion\": \"yingce.plugin/v2\",\n  \"id\": \"vgenv-video\",\n  \"name\": \"vgenv Video\",\n  \"version\": \"2.0.0\",\n  \"author\": \"vgenv / 影策\",\n  \"description\": \"vgenv V3 异步视频接口：文生视频、首帧、尾帧、首尾帧、全能参考（最多 9 张图）与首帧 + 参考图。\",\n  \"documentation\": \"<当前插件的完整 documentation，由 README.md 与 docs/interface.md 拼接而成；为避免 JSON 递归，此处不重复展开正文。>\",\n  \"permissions\": [\n    \"generation.run\",\n    \"media.read\"\n  ],\n  \"configuration\": {\n    \"fields\": [\n      {\n        \"name\": \"apiKey\",\n        \"type\": \"secret\",\n        \"label\": \"API Key\",\n        \"required\": true\n      }\n    ]\n  },\n  \"contributes\": {\n    \"providers\": [\n      {\n        \"id\": \"vgenv-video\",\n        \"label\": \"vgenv Video\",\n        \"capabilities\": [\n          \"video\"\n        ],\n        \"scopes\": [\n          \"admin.system-channel\",\n          \"user.custom-channel\",\n          \"canvas\",\n          \"creation\",\n          \"agent\"\n        ],\n        \"baseUrl\": \"https://api.vgenv.com\",\n        \"requiresPublicMediaUrls\": false,\n        \"detachedPolling\": true,\n        \"idempotentCreate\": true,\n        \"referenceSyntax\": {\n          \"image\": \"<Picture {n}>\",\n          \"firstFrame\": \"[First frame]\",\n          \"lastFrame\": \"[Last frame]\",\n          \"honorFrameNodes\": true,\n          \"singleImageIsFirstFrame\": true\n        },\n        \"auth\": {\n          \"type\": \"bearer\",\n          \"field\": \"apiKey\"\n        },\n        \"parameters\": [\n          {\n            \"name\": \"model\",\n            \"type\": \"string\",\n            \"required\": true,\n            \"mapping\": \"model\",\n            \"description\": \"视频模型 ID。\"\n          },\n          {\n            \"name\": \"prompt\",\n            \"type\": \"string\",\n            \"required\": true,\n            \"mapping\": \"prompt/content/input\",\n            \"description\": \"视频提示词。\"\n          },\n          {\n            \"name\": \"images\",\n            \"type\": \"media[]\",\n            \"required\": false,\n            \"mapping\": \"first/last/reference image\",\n            \"description\": \"显式 role 图片输入。\"\n          },\n          {\n            \"name\": \"videos\",\n            \"type\": \"media[]\",\n            \"required\": false,\n            \"mapping\": \"reference video\",\n            \"description\": \"参考视频。\"\n          },\n          {\n            \"name\": \"audios\",\n            \"type\": \"media[]\",\n            \"required\": false,\n            \"mapping\": \"reference audio/voice\",\n            \"description\": \"参考音频或音色。\"\n          },\n          {\n            \"name\": \"duration\",\n            \"type\": \"integer\",\n            \"required\": false,\n            \"mapping\": \"duration/seconds\",\n            \"description\": \"时长秒数。\"\n          },\n          {\n            \"name\": \"aspectRatio\",\n            \"type\": \"string\",\n            \"required\": false,\n            \"mapping\": \"ratio/aspect_ratio/size\",\n            \"description\": \"画幅比例或尺寸。\"\n          },\n          {\n            \"name\": \"resolution\",\n            \"type\": \"string\",\n            \"required\": false,\n            \"mapping\": \"resolution\",\n            \"description\": \"分辨率档位。\"\n          },\n          {\n            \"name\": \"generateAudio\",\n            \"type\": \"boolean\",\n            \"required\": false,\n            \"mapping\": \"generate_audio\",\n            \"description\": \"是否生成音频。\"\n          },\n          {\n            \"name\": \"watermark\",\n            \"type\": \"boolean\",\n            \"required\": false,\n            \"mapping\": \"watermark\",\n            \"description\": \"水印开关。\"\n          },\n          {\n            \"name\": \"providerOptions\",\n            \"type\": \"object\",\n            \"required\": false,\n            \"mapping\": \"provider-specific fields\",\n            \"description\": \"插件命名空间内的厂商扩展字段。\"\n          }\n        ],\n        \"validations\": [\n          {\n            \"assert\": {\n              \"$gte\": [\n                {\n                  \"$len\": {\n                    \"$trim\": {\n                      \"$ref\": \"request.prompt\"\n                    }\n                  }\n                },\n                5\n              ]\n            },\n            \"message\": \"vgenv 提示词至少需要 5 个字符，请补充动作、场景或角色描述\"\n          },\n          {\n            \"assert\": {\n              \"$in\": [\n                {\n                  \"$at\": [\n                    {\n                      \"$split\": [\n                        {\n                          \"$ref\": \"request.model\"\n                        },\n                        \":\"\n                      ]\n                    },\n                    0\n                  ]\n                },\n                [\n                  \"base\",\n                  \"cinematic\",\n                  \"origin\"\n                ]\n              ]\n            },\n            \"message\": \"vgenv 模型 ID 必须写成 <model>:<tier>，model 为 base、cinematic 或 origin\"\n          },\n          {\n            \"assert\": {\n              \"$in\": [\n                {\n                  \"$coalesce\": [\n                    {\n                      \"$at\": [\n                        {\n                          \"$split\": [\n                            {\n                              \"$ref\": \"request.model\"\n                            },\n                            \":\"\n                          ]\n                        },\n                        1\n                      ]\n                    },\n                    \"fast\"\n                  ]\n                },\n                [\n                  \"fast\",\n                  \"standard\",\n                  \"enhanced\",\n                  \"quality\"\n                ]\n              ]\n            },\n            \"message\": \"vgenv 档位必须是 fast、standard、enhanced 或 quality\"\n          },\n          {\n            \"assert\": {\n              \"$or\": [\n                {\n                  \"$eq\": [\n                    {\n                      \"$ref\": \"request.duration\"\n                    },\n                    0\n                  ]\n                },\n                {\n                  \"$and\": [\n                    {\n                      \"$gte\": [\n                        {\n                          \"$ref\": \"request.duration\"\n                        },\n                        2\n                      ]\n                    },\n                    {\n                      \"$lte\": [\n                        {\n                          \"$ref\": \"request.duration\"\n                        },\n                        15\n                      ]\n                    }\n                  ]\n                }\n              ]\n            },\n            \"message\": \"vgenv 视频时长应为 2–15 秒整数（480p 为 4–15 秒）\"\n          },\n          {\n            \"assert\": {\n              \"$in\": [\n                {\n                  \"$lower\": {\n                    \"$trim\": {\n                      \"$coalesce\": [\n                        {\n                          \"$ref\": \"request.resolution\"\n                        },\n                        \"480p\"\n                      ]\n                    }\n                  }\n                },\n                [\n                  \"480p\",\n                  \"768p\"\n                ]\n              ]\n            },\n            \"message\": \"vgenv 分辨率只支持 480p 或 768p\"\n          },\n          {\n            \"assert\": {\n              \"$in\": [\n                {\n                  \"$coalesce\": [\n                    {\n                      \"$trim\": {\n                        \"$ref\": \"request.aspectRatio\"\n                      }\n                    },\n                    \"9:16\"\n                  ]\n                },\n                [\n                  \"9:16\",\n                  \"2:3\",\n                  \"3:4\",\n                  \"1:1\",\n                  \"4:3\",\n                  \"3:2\",\n                  \"16:9\",\n                  \"21:9\"\n                ]\n              ]\n            },\n            \"message\": \"vgenv 不支持该画幅比例\"\n          },\n          {\n            \"assert\": {\n              \"$lte\": [\n                {\n                  \"$len\": {\n                    \"$filter\": {\n                      \"from\": {\n                        \"$sortByOrder\": {\n                          \"$ref\": \"request.images\"\n                        }\n                      },\n                      \"as\": \"media\",\n                      \"where\": {\n                        \"$in\": [\n                          {\n                            \"$ref\": \"media.role\"\n                          },\n                          [\n                            \"reference_image\",\n                            \"subject_reference\",\n                            \"style_reference\",\n                            \"\"\n                          ]\n                        ]\n                      }\n                    }\n                  }\n                },\n                9\n              ]\n            },\n            \"message\": \"vgenv 最多支持 9 张参考图\"\n          },\n          {\n            \"assert\": {\n              \"$lte\": [\n                {\n                  \"$len\": {\n                    \"$filter\": {\n                      \"from\": {\n                        \"$sortByOrder\": {\n                          \"$ref\": \"request.images\"\n                        }\n                      },\n                      \"as\": \"media\",\n                      \"where\": {\n                        \"$in\": [\n                          {\n                            \"$ref\": \"media.role\"\n                          },\n                          [\n                            \"first_frame\"\n                          ]\n                        ]\n                      }\n                    }\n                  }\n                },\n                1\n              ]\n            },\n            \"message\": \"vgenv 首帧最多 1 张\"\n          },\n          {\n            \"assert\": {\n              \"$lte\": [\n                {\n                  \"$len\": {\n                    \"$filter\": {\n                      \"from\": {\n                        \"$sortByOrder\": {\n                          \"$ref\": \"request.images\"\n                        }\n                      },\n                      \"as\": \"media\",\n                      \"where\": {\n                        \"$in\": [\n                          {\n                            \"$ref\": \"media.role\"\n                          },\n                          [\n                            \"last_frame\"\n                          ]\n                        ]\n                      }\n                    }\n                  }\n                },\n                1\n              ]\n            },\n            \"message\": \"vgenv 尾帧最多 1 张\"\n          },\n          {\n            \"assert\": {\n              \"$eq\": [\n                {\n                  \"$len\": {\n                    \"$ref\": \"request.videos\"\n                  }\n                },\n                0\n              ]\n            },\n            \"message\": \"vgenv 参考视频需要先上传为素材，当前插件暂不支持，请移除参考视频\"\n          },\n          {\n            \"assert\": {\n              \"$eq\": [\n                {\n                  \"$len\": {\n                    \"$ref\": \"request.audios\"\n                  }\n                },\n                0\n              ]\n            },\n            \"message\": \"vgenv 参考音频需要先上传为素材，当前插件暂不支持，请移除参考音频\"\n          },\n          {\n            \"assert\": {\n              \"$not\": {\n                \"$and\": [\n                  {\n                    \"$gt\": [\n                      {\n                        \"$len\": {\n                          \"$filter\": {\n                            \"from\": {\n                              \"$sortByOrder\": {\n                                \"$ref\": \"request.images\"\n                              }\n                            },\n                            \"as\": \"media\",\n                            \"where\": {\n                              \"$in\": [\n                                {\n                                  \"$ref\": \"media.role\"\n                                },\n                                [\n                                  \"last_frame\"\n                                ]\n                              ]\n                            }\n                          }\n                        }\n                      },\n                      0\n                    ]\n                  },\n                  {\n                    \"$gt\": [\n                      {\n                        \"$len\": {\n                          \"$filter\": {\n                            \"from\": {\n                              \"$sortByOrder\": {\n                                \"$ref\": \"request.images\"\n                              }\n                            },\n                            \"as\": \"media\",\n                            \"where\": {\n                              \"$in\": [\n                                {\n                                  \"$ref\": \"media.role\"\n                                },\n                                [\n                                  \"reference_image\",\n                                  \"subject_reference\",\n                                  \"style_reference\",\n                                  \"\"\n                                ]\n                              ]\n                            }\n                          }\n                        }\n                      },\n                      0\n                    ]\n                  }\n                ]\n              }\n            },\n            \"message\": \"vgenv 尾帧不能与参考图同时使用；请改用“首帧 + 参考图”，或去掉参考图\"\n          },\n          {\n            \"assert\": {\n              \"$or\": [\n                {\n                  \"$ne\": [\n                    {\n                      \"$at\": [\n                        {\n                          \"$split\": [\n                            {\n                              \"$ref\": \"request.model\"\n                            },\n                            \":\"\n                          ]\n                        },\n                        0\n                      ]\n                    },\n                    \"origin\"\n                  ]\n                },\n                {\n                  \"$eq\": [\n                    {\n                      \"$len\": {\n                        \"$filter\": {\n                          \"from\": {\n                            \"$sortByOrder\": {\n                              \"$ref\": \"request.images\"\n                            }\n                          },\n                          \"as\": \"media\",\n                          \"where\": {\n                            \"$in\": [\n                              {\n                                \"$ref\": \"media.role\"\n                              },\n                              [\n                                \"reference_image\",\n                                \"subject_reference\",\n                                \"style_reference\",\n                                \"\"\n                              ]\n                            ]\n                          }\n                        }\n                      }\n                    },\n                    0\n                  ]\n                },\n                {\n                  \"$eq\": [\n                    {\n                      \"$len\": {\n                        \"$filter\": {\n                          \"from\": {\n                            \"$sortByOrder\": {\n                              \"$ref\": \"request.images\"\n                            }\n                          },\n                          \"as\": \"media\",\n                          \"where\": {\n                            \"$in\": [\n                              {\n                                \"$ref\": \"media.role\"\n                              },\n                              [\n                                \"first_frame\"\n                              ]\n                            ]\n                          }\n                        }\n                      }\n                    },\n                    0\n                  ]\n                }\n              ]\n            },\n            \"message\": \"vgenv Origin 不支持“首帧 + 参考图”，请改用 Base 或 Cinematic\"\n          }\n        ],\n        \"create\": {\n          \"method\": \"POST\",\n          \"path\": \"/v3/videos\",\n          \"contentType\": \"application/json\",\n          \"body\": {\n            \"model\": {\n              \"$at\": [\n                {\n                  \"$split\": [\n                    {\n                      \"$ref\": \"request.model\"\n                    },\n                    \":\"\n                  ]\n                },\n                0\n              ]\n            },\n            \"tier\": {\n              \"$coalesce\": [\n                {\n                  \"$at\": [\n                    {\n                      \"$split\": [\n                        {\n                          \"$ref\": \"request.model\"\n                        },\n                        \":\"\n                      ]\n                    },\n                    1\n                  ]\n                },\n                \"fast\"\n              ]\n            },\n            \"prompt\": {\n              \"$ref\": \"request.prompt\"\n            },\n            \"duration\": {\n              \"$omitEmpty\": {\n                \"$if\": {\n                  \"condition\": {\n                    \"$gt\": [\n                      {\n                        \"$ref\": \"request.duration\"\n                      },\n                      0\n                    ]\n                  },\n                  \"then\": {\n                    \"$ref\": \"request.duration\"\n                  },\n                  \"else\": null\n                }\n              }\n            },\n            \"resolution\": {\n              \"$omitEmpty\": {\n                \"$lower\": {\n                  \"$trim\": {\n                    \"$ref\": \"request.resolution\"\n                  }\n                }\n              }\n            },\n            \"aspect_ratio\": {\n              \"$omitEmpty\": {\n                \"$trim\": {\n                  \"$ref\": \"request.aspectRatio\"\n                }\n              }\n            },\n            \"seed\": {\n              \"$omitEmpty\": {\n                \"$ref\": \"request.providerOptions.vgenv-video.seed\"\n              }\n            },\n            \"prompt_optimization\": {\n              \"$omitEmpty\": {\n                \"$if\": {\n                  \"condition\": {\n                    \"$ref\": \"request.providerOptions.vgenv-video.prompt_optimization\"\n                  },\n                  \"then\": {\n                    \"mode\": {\n                      \"$ref\": \"request.providerOptions.vgenv-video.prompt_optimization\"\n                    }\n                  },\n                  \"else\": null\n                }\n              }\n            },\n            \"combat_enhancement\": {\n              \"$omitEmpty\": {\n                \"$if\": {\n                  \"condition\": {\n                    \"$ref\": \"request.providerOptions.vgenv-video.combat_enhancement\"\n                  },\n                  \"then\": true,\n                  \"else\": null\n                }\n              }\n            },\n            \"motion_speed\": {\n              \"$omitEmpty\": {\n                \"$if\": {\n                  \"condition\": {\n                    \"$ref\": \"request.providerOptions.vgenv-video.combat_enhancement\"\n                  },\n                  \"then\": {\n                    \"$ref\": \"request.providerOptions.vgenv-video.motion_speed\"\n                  },\n                  \"else\": null\n                }\n              }\n            },\n            \"upscale\": {\n              \"$omitEmpty\": {\n                \"$if\": {\n                  \"condition\": {\n                    \"$eq\": [\n                      {\n                        \"$ref\": \"request.providerOptions.vgenv-video.upscale\"\n                      },\n                      \"2x\"\n                    ]\n                  },\n                  \"then\": \"2x\",\n                  \"else\": null\n                }\n              }\n            },\n            \"frame_images\": {\n              \"$omitEmpty\": {\n                \"$concatArrays\": [\n                  {\n                    \"$map\": {\n                      \"from\": {\n                        \"$filter\": {\n                          \"from\": {\n                            \"$sortByOrder\": {\n                              \"$ref\": \"request.images\"\n                            }\n                          },\n                          \"as\": \"media\",\n                          \"where\": {\n                            \"$in\": [\n                              {\n                                \"$ref\": \"media.role\"\n                              },\n                              [\n                                \"first_frame\"\n                              ]\n                            ]\n                          }\n                        }\n                      },\n                      \"as\": \"media\",\n                      \"in\": {\n                        \"type\": \"image_url\",\n                        \"image_url\": {\n                          \"url\": {\n                            \"$ref\": \"media.value\"\n                          }\n                        },\n                        \"frame_type\": \"first_frame\"\n                      }\n                    }\n                  },\n                  {\n                    \"$map\": {\n                      \"from\": {\n                        \"$filter\": {\n                          \"from\": {\n                            \"$sortByOrder\": {\n                              \"$ref\": \"request.images\"\n                            }\n                          },\n                          \"as\": \"media\",\n                          \"where\": {\n                            \"$in\": [\n                              {\n                                \"$ref\": \"media.role\"\n                              },\n                              [\n                                \"last_frame\"\n                              ]\n                            ]\n                          }\n                        }\n                      },\n                      \"as\": \"media\",\n                      \"in\": {\n                        \"type\": \"image_url\",\n                        \"image_url\": {\n                          \"url\": {\n                            \"$ref\": \"media.value\"\n                          }\n                        },\n                        \"frame_type\": \"last_frame\"\n                      }\n                    }\n                  }\n                ]\n              }\n            },\n            \"reference_images\": {\n              \"$omitEmpty\": {\n                \"$map\": {\n                  \"from\": {\n                    \"$filter\": {\n                      \"from\": {\n                        \"$sortByOrder\": {\n                          \"$ref\": \"request.images\"\n                        }\n                      },\n                      \"as\": \"media\",\n                      \"where\": {\n                        \"$in\": [\n                          {\n                            \"$ref\": \"media.role\"\n                          },\n                          [\n                            \"reference_image\",\n                            \"subject_reference\",\n                            \"style_reference\",\n                            \"\"\n                          ]\n                        ]\n                      }\n                    }\n                  },\n                  \"as\": \"media\",\n                  \"in\": {\n                    \"type\": \"image_url\",\n                    \"image_url\": {\n                      \"url\": {\n                        \"$ref\": \"media.value\"\n                      }\n                    }\n                  }\n                }\n              }\n            }\n          },\n          \"headers\": {\n            \"Idempotency-Key\": {\n              \"$ref\": \"request.extra.idempotencyKey\"\n            }\n          }\n        },\n        \"poll\": {\n          \"method\": \"GET\",\n          \"path\": \"/v3/videos/{{taskId}}\"\n        },\n        \"cancel\": {\n          \"method\": \"DELETE\",\n          \"path\": \"/v3/videos/{{taskId}}\"\n        },\n        \"response\": {\n          \"taskId\": {\n            \"$coalesce\": [\n              {\n                \"$ref\": \"response.id\"\n              },\n              {\n                \"$ref\": \"taskId\"\n              }\n            ]\n          },\n          \"status\": {\n            \"$coalesce\": [\n              {\n                \"$ref\": \"response.status\"\n              },\n              \"queued\"\n            ]\n          },\n          \"message\": {\n            \"$coalesce\": [\n              {\n                \"$ref\": \"response.error.message\"\n              },\n              {\n                \"$ref\": \"response.message\"\n              }\n            ]\n          },\n          \"stage\": {\n            \"$if\": {\n              \"condition\": {\n                \"$eq\": [\n                  {\n                    \"$ref\": \"response.status\"\n                  },\n                  \"preparing\"\n                ]\n              },\n              \"then\": \"准备素材与审核提示词\",\n              \"else\": null\n            }\n          },\n          \"queueAhead\": {\n            \"$ref\": \"response.queue_position\"\n          },\n          \"videos\": {\n            \"$ref\": \"response.output.url\"\n          },\n          \"usage\": {\n            \"$omitEmpty\": {\n              \"priceCurrency\": {\n                \"$ref\": \"response.price.currency\"\n              },\n              \"priceAmountMicros\": {\n                \"$ref\": \"response.price.amount_micros\"\n              }\n            }\n          },\n          \"errorPaths\": [\n            \"error.code\"\n          ],\n          \"resultEphemeral\": true\n        }\n      }\n    ]\n  }\n}\n```\n<!-- YINGCE_MANIFEST_CONTRACT_END -->\n",
++  "permissions": [
++    "generation.run",
++    "media.read"
++  ],
++  "configuration": {
++    "fields": [
++      {
++        "name": "apiKey",
++        "type": "secret",
++        "label": "API Key",
++        "required": true
++      }
++    ]
++  },
++  "contributes": {
++    "providers": [
++      {
++        "id": "vgenv-video",
++        "label": "vgenv Video",
++        "capabilities": [
++          "video"
++        ],
++        "scopes": [
++          "admin.system-channel",
++          "user.custom-channel",
++          "canvas",
++          "creation",
++          "agent"
++        ],
++        "baseUrl": "https://api.vgenv.com",
++        "requiresPublicMediaUrls": false,
++        "detachedPolling": true,
++        "idempotentCreate": true,
++        "referenceSyntax": {
++          "image": "<Picture {n}>",
++          "firstFrame": "[First frame]",
++          "lastFrame": "[Last frame]",
++          "honorFrameNodes": true,
++          "singleImageIsFirstFrame": true
++        },
++        "auth": {
++          "type": "bearer",
++          "field": "apiKey"
++        },
++        "parameters": [
++          {
++            "name": "model",
++            "type": "string",
++            "required": true,
++            "mapping": "model",
++            "description": "视频模型 ID。"
++          },
++          {
++            "name": "prompt",
++            "type": "string",
++            "required": true,
++            "mapping": "prompt/content/input",
++            "description": "视频提示词。"
++          },
++          {
++            "name": "images",
++            "type": "media[]",
++            "required": false,
++            "mapping": "first/last/reference image",
++            "description": "显式 role 图片输入。"
++          },
++          {
++            "name": "videos",
++            "type": "media[]",
++            "required": false,
++            "mapping": "reference video",
++            "description": "参考视频。"
++          },
++          {
++            "name": "audios",
++            "type": "media[]",
++            "required": false,
++            "mapping": "reference audio/voice",
++            "description": "参考音频或音色。"
++          },
++          {
++            "name": "duration",
++            "type": "integer",
++            "required": false,
++            "mapping": "duration/seconds",
++            "description": "时长秒数。"
++          },
++          {
++            "name": "aspectRatio",
++            "type": "string",
++            "required": false,
++            "mapping": "ratio/aspect_ratio/size",
++            "description": "画幅比例或尺寸。"
++          },
++          {
++            "name": "resolution",
++            "type": "string",
++            "required": false,
++            "mapping": "resolution",
++            "description": "分辨率档位。"
++          },
++          {
++            "name": "generateAudio",
++            "type": "boolean",
++            "required": false,
++            "mapping": "generate_audio",
++            "description": "是否生成音频。"
++          },
++          {
++            "name": "watermark",
++            "type": "boolean",
++            "required": false,
++            "mapping": "watermark",
++            "description": "水印开关。"
++          },
++          {
++            "name": "providerOptions",
++            "type": "object",
++            "required": false,
++            "mapping": "provider-specific fields",
++            "description": "插件命名空间内的厂商扩展字段。"
++          }
++        ],
++        "validations": [
++          {
++            "assert": {
++              "$gte": [
++                {
++                  "$len": {
++                    "$trim": {
++                      "$ref": "request.prompt"
++                    }
++                  }
++                },
++                5
++              ]
++            },
++            "message": "vgenv 提示词至少需要 5 个字符，请补充动作、场景或角色描述"
++          },
++          {
++            "assert": {
++              "$in": [
++                {
++                  "$at": [
++                    {
++                      "$split": [
++                        {
++                          "$ref": "request.model"
++                        },
++                        ":"
++                      ]
++                    },
++                    0
++                  ]
++                },
++                [
++                  "base",
++                  "cinematic",
++                  "origin"
++                ]
++              ]
++            },
++            "message": "vgenv 模型 ID 必须写成 <model>:<tier>，model 为 base、cinematic 或 origin"
++          },
++          {
++            "assert": {
++              "$in": [
++                {
++                  "$coalesce": [
++                    {
++                      "$at": [
++                        {
++                          "$split": [
++                            {
++                              "$ref": "request.model"
++                            },
++                            ":"
++                          ]
++                        },
++                        1
++                      ]
++                    },
++                    "fast"
++                  ]
++                },
++                [
++                  "fast",
++                  "standard",
++                  "enhanced",
++                  "quality"
++                ]
++              ]
++            },
++            "message": "vgenv 档位必须是 fast、standard、enhanced 或 quality"
++          },
++          {
++            "assert": {
++              "$or": [
++                {
++                  "$eq": [
++                    {
++                      "$ref": "request.duration"
++                    },
++                    0
++                  ]
++                },
++                {
++                  "$and": [
++                    {
++                      "$gte": [
++                        {
++                          "$ref": "request.duration"
++                        },
++                        2
++                      ]
++                    },
++                    {
++                      "$lte": [
++                        {
++                          "$ref": "request.duration"
++                        },
++                        15
++                      ]
++                    }
++                  ]
++                }
++              ]
++            },
++            "message": "vgenv 视频时长应为 2–15 秒整数（480p 为 4–15 秒）"
++          },
++          {
++            "assert": {
++              "$in": [
++                {
++                  "$lower": {
++                    "$trim": {
++                      "$coalesce": [
++                        {
++                          "$ref": "request.resolution"
++                        },
++                        "480p"
++                      ]
++                    }
++                  }
++                },
++                [
++                  "480p",
++                  "768p"
++                ]
++              ]
++            },
++            "message": "vgenv 分辨率只支持 480p 或 768p"
++          },
++          {
++            "assert": {
++              "$in": [
++                {
++                  "$coalesce": [
++                    {
++                      "$trim": {
++                        "$ref": "request.aspectRatio"
++                      }
++                    },
++                    "9:16"
++                  ]
++                },
++                [
++                  "9:16",
++                  "2:3",
++                  "3:4",
++                  "1:1",
++                  "4:3",
++                  "3:2",
++                  "16:9",
++                  "21:9"
++                ]
++              ]
++            },
++            "message": "vgenv 不支持该画幅比例"
++          },
++          {
++            "assert": {
++              "$lte": [
++                {
++                  "$len": {
++                    "$filter": {
++                      "from": {
++                        "$sortByOrder": {
++                          "$ref": "request.images"
++                        }
++                      },
++                      "as": "media",
++                      "where": {
++                        "$in": [
++                          {
++                            "$ref": "media.role"
++                          },
++                          [
++                            "reference_image",
++                            "subject_reference",
++                            "style_reference",
++                            ""
++                          ]
++                        ]
++                      }
++                    }
++                  }
++                },
++                9
++              ]
++            },
++            "message": "vgenv 最多支持 9 张参考图"
++          },
++          {
++            "assert": {
++              "$lte": [
++                {
++                  "$len": {
++                    "$filter": {
++                      "from": {
++                        "$sortByOrder": {
++                          "$ref": "request.images"
++                        }
++                      },
++                      "as": "media",
++                      "where": {
++                        "$in": [
++                          {
++                            "$ref": "media.role"
++                          },
++                          [
++                            "first_frame"
++                          ]
++                        ]
++                      }
++                    }
++                  }
++                },
++                1
++              ]
++            },
++            "message": "vgenv 首帧最多 1 张"
++          },
++          {
++            "assert": {
++              "$lte": [
++                {
++                  "$len": {
++                    "$filter": {
++                      "from": {
++                        "$sortByOrder": {
++                          "$ref": "request.images"
++                        }
++                      },
++                      "as": "media",
++                      "where": {
++                        "$in": [
++                          {
++                            "$ref": "media.role"
++                          },
++                          [
++                            "last_frame"
++                          ]
++                        ]
++                      }
++                    }
++                  }
++                },
++                1
++              ]
++            },
++            "message": "vgenv 尾帧最多 1 张"
++          },
++          {
++            "assert": {
++              "$eq": [
++                {
++                  "$len": {
++                    "$ref": "request.videos"
++                  }
++                },
++                0
++              ]
++            },
++            "message": "vgenv 参考视频需要先上传为素材，当前插件暂不支持，请移除参考视频"
++          },
++          {
++            "assert": {
++              "$eq": [
++                {
++                  "$len": {
++                    "$ref": "request.audios"
++                  }
++                },
++                0
++              ]
++            },
++            "message": "vgenv 参考音频需要先上传为素材，当前插件暂不支持，请移除参考音频"
++          },
++          {
++            "assert": {
++              "$not": {
++                "$and": [
++                  {
++                    "$gt": [
++                      {
++                        "$len": {
++                          "$filter": {
++                            "from": {
++                              "$sortByOrder": {
++                                "$ref": "request.images"
++                              }
++                            },
++                            "as": "media",
++                            "where": {
++                              "$in": [
++                                {
++                                  "$ref": "media.role"
++                                },
++                                [
++                                  "last_frame"
++                                ]
++                              ]
++                            }
++                          }
++                        }
++                      },
++                      0
++                    ]
++                  },
++                  {
++                    "$gt": [
++                      {
++                        "$len": {
++                          "$filter": {
++                            "from": {
++                              "$sortByOrder": {
++                                "$ref": "request.images"
++                              }
++                            },
++                            "as": "media",
++                            "where": {
++                              "$in": [
++                                {
++                                  "$ref": "media.role"
++                                },
++                                [
++                                  "reference_image",
++                                  "subject_reference",
++                                  "style_reference",
++                                  ""
++                                ]
++                              ]
++                            }
++                          }
++                        }
++                      },
++                      0
++                    ]
++                  }
++                ]
++              }
++            },
++            "message": "vgenv 尾帧不能与参考图同时使用；请改用“首帧 + 参考图”，或去掉参考图"
++          },
++          {
++            "assert": {
++              "$or": [
++                {
++                  "$ne": [
++                    {
++                      "$at": [
++                        {
++                          "$split": [
++                            {
++                              "$ref": "request.model"
++                            },
++                            ":"
++                          ]
++                        },
++                        0
++                      ]
++                    },
++                    "origin"
++                  ]
++                },
++                {
++                  "$eq": [
++                    {
++                      "$len": {
++                        "$filter": {
++                          "from": {
++                            "$sortByOrder": {
++                              "$ref": "request.images"
++                            }
++                          },
++                          "as": "media",
++                          "where": {
++                            "$in": [
++                              {
++                                "$ref": "media.role"
++                              },
++                              [
++                                "reference_image",
++                                "subject_reference",
++                                "style_reference",
++                                ""
++                              ]
++                            ]
++                          }
++                        }
++                      }
++                    },
++                    0
++                  ]
++                },
++                {
++                  "$eq": [
++                    {
++                      "$len": {
++                        "$filter": {
++                          "from": {
++                            "$sortByOrder": {
++                              "$ref": "request.images"
++                            }
++                          },
++                          "as": "media",
++                          "where": {
++                            "$in": [
++                              {
++                                "$ref": "media.role"
++                              },
++                              [
++                                "first_frame"
++                              ]
++                            ]
++                          }
++                        }
++                      }
++                    },
++                    0
++                  ]
++                }
++              ]
++            },
++            "message": "vgenv Origin 不支持“首帧 + 参考图”，请改用 Base 或 Cinematic"
++          }
++        ],
++        "create": {
++          "method": "POST",
++          "path": "/v3/videos",
++          "contentType": "application/json",
++          "body": {
++            "model": {
++              "$at": [
++                {
++                  "$split": [
++                    {
++                      "$ref": "request.model"
++                    },
++                    ":"
++                  ]
++                },
++                0
++              ]
++            },
++            "tier": {
++              "$coalesce": [
++                {
++                  "$at": [
++                    {
++                      "$split": [
++                        {
++                          "$ref": "request.model"
++                        },
++                        ":"
++                      ]
++                    },
++                    1
++                  ]
++                },
++                "fast"
++              ]
++            },
++            "prompt": {
++              "$ref": "request.prompt"
++            },
++            "duration": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$gt": [
++                      {
++                        "$ref": "request.duration"
++                      },
++                      0
++                    ]
++                  },
++                  "then": {
++                    "$ref": "request.duration"
++                  },
++                  "else": null
++                }
++              }
++            },
++            "resolution": {
++              "$omitEmpty": {
++                "$lower": {
++                  "$trim": {
++                    "$ref": "request.resolution"
++                  }
++                }
++              }
++            },
++            "aspect_ratio": {
++              "$omitEmpty": {
++                "$trim": {
++                  "$ref": "request.aspectRatio"
++                }
++              }
++            },
++            "seed": {
++              "$omitEmpty": {
++                "$ref": "request.providerOptions.vgenv-video.seed"
++              }
++            },
++            "prompt_optimization": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$ref": "request.providerOptions.vgenv-video.prompt_optimization"
++                  },
++                  "then": {
++                    "mode": {
++                      "$ref": "request.providerOptions.vgenv-video.prompt_optimization"
++                    }
++                  },
++                  "else": null
++                }
++              }
++            },
++            "combat_enhancement": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$ref": "request.providerOptions.vgenv-video.combat_enhancement"
++                  },
++                  "then": true,
++                  "else": null
++                }
++              }
++            },
++            "motion_speed": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$ref": "request.providerOptions.vgenv-video.combat_enhancement"
++                  },
++                  "then": {
++                    "$ref": "request.providerOptions.vgenv-video.motion_speed"
++                  },
++                  "else": null
++                }
++              }
++            },
++            "upscale": {
++              "$omitEmpty": {
++                "$if": {
++                  "condition": {
++                    "$eq": [
++                      {
++                        "$ref": "request.providerOptions.vgenv-video.upscale"
++                      },
++                      "2x"
++                    ]
++                  },
++                  "then": "2x",
++                  "else": null
++                }
++              }
++            },
++            "frame_images": {
++              "$omitEmpty": {
++                "$concatArrays": [
++                  {
++                    "$map": {
++                      "from": {
++                        "$filter": {
++                          "from": {
++                            "$sortByOrder": {
++                              "$ref": "request.images"
++                            }
++                          },
++                          "as": "media",
++                          "where": {
++                            "$in": [
++                              {
++                                "$ref": "media.role"
++                              },
++                              [
++                                "first_frame"
++                              ]
++                            ]
++                          }
++                        }
++                      },
++                      "as": "media",
++                      "in": {
++                        "type": "image_url",
++                        "image_url": {
++                          "url": {
++                            "$ref": "media.value"
++                          }
++                        },
++                        "frame_type": "first_frame"
++                      }
++                    }
++                  },
++                  {
++                    "$map": {
++                      "from": {
++                        "$filter": {
++                          "from": {
++                            "$sortByOrder": {
++                              "$ref": "request.images"
++                            }
++                          },
++                          "as": "media",
++                          "where": {
++                            "$in": [
++                              {
++                                "$ref": "media.role"
++                              },
++                              [
++                                "last_frame"
++                              ]
++                            ]
++                          }
++                        }
++                      },
++                      "as": "media",
++                      "in": {
++                        "type": "image_url",
++                        "image_url": {
++                          "url": {
++                            "$ref": "media.value"
++                          }
++                        },
++                        "frame_type": "last_frame"
++                      }
++                    }
++                  }
++                ]
++              }
++            },
++            "reference_images": {
++              "$omitEmpty": {
++                "$map": {
++                  "from": {
++                    "$filter": {
++                      "from": {
++                        "$sortByOrder": {
++                          "$ref": "request.images"
++                        }
++                      },
++                      "as": "media",
++                      "where": {
++                        "$in": [
++                          {
++                            "$ref": "media.role"
++                          },
++                          [
++                            "reference_image",
++                            "subject_reference",
++                            "style_reference",
++                            ""
++                          ]
++                        ]
++                      }
++                    }
++                  },
++                  "as": "media",
++                  "in": {
++                    "type": "image_url",
++                    "image_url": {
++                      "url": {
++                        "$ref": "media.value"
++                      }
++                    }
++                  }
++                }
++              }
++            }
++          },
++          "headers": {
++            "Idempotency-Key": {
++              "$ref": "request.extra.idempotencyKey"
++            }
++          }
++        },
++        "poll": {
++          "method": "GET",
++          "path": "/v3/videos/{{taskId}}"
++        },
++        "cancel": {
++          "method": "DELETE",
++          "path": "/v3/videos/{{taskId}}"
++        },
++        "response": {
++          "taskId": {
++            "$coalesce": [
++              {
++                "$ref": "response.id"
++              },
++              {
++                "$ref": "taskId"
++              }
++            ]
++          },
++          "status": {
++            "$coalesce": [
++              {
++                "$ref": "response.status"
++              },
++              "queued"
++            ]
++          },
++          "message": {
++            "$coalesce": [
++              {
++                "$ref": "response.error.message"
++              },
++              {
++                "$ref": "response.message"
++              }
++            ]
++          },
++          "stage": {
++            "$if": {
++              "condition": {
++                "$eq": [
++                  {
++                    "$ref": "response.status"
++                  },
++                  "preparing"
++                ]
++              },
++              "then": "准备素材与审核提示词",
++              "else": null
++            }
++          },
++          "queueAhead": {
++            "$ref": "response.queue_position"
++          },
++          "videos": {
++            "$ref": "response.output.url"
++          },
++          "usage": {
++            "$omitEmpty": {
++              "priceCurrency": {
++                "$ref": "response.price.currency"
++              },
++              "priceAmountMicros": {
++                "$ref": "response.price.amount_micros"
++              }
++            }
++          },
++          "errorPaths": [
++            "error.code"
++          ],
++          "resultEphemeral": true
++        }
++      }
++    ]
++  }
++}
+diff --git a/web/src/lib/model-capabilities.ts b/web/src/lib/model-capabilities.ts
+index 9caa89e..f5a1d96 100644
+--- a/web/src/lib/model-capabilities.ts
++++ b/web/src/lib/model-capabilities.ts
+@@ -546,6 +546,17 @@ export function defaultModelCapabilityConfig(protocol?: ModelProtocol, model = "
+         video.defaultResolution = "720P";
+         video.operations.push("reference_to_video", "audio_to_video");
+     }
++    if (protocol === "vgenv-video") {
++        video.references.maxImages = 9;
++        video.references.maxVideos = 0;
++        video.references.maxAudios = 0;
++        video.duration = { selection: "range", min: 2, max: 15, step: 1, default: 5 };
++        video.ratios = ["9:16", "2:3", "3:4", "1:1", "4:3", "3:2", "16:9", "21:9"];
++        video.defaultRatio = "9:16";
++        video.resolutions = ["480p", "768p"];
++        video.defaultResolution = "768p";
++        video.operations.push("reference_to_video");
++    }
+     if (protocol === VOLCENGINE_MEDIAKIT_ENHANCE_VIDEO_PROTOCOL) {
+         // 与后端默认值一致：只接收一个源视频，帧率默认保持原片。
+         video.references = { ...video.references, minImages: 0, maxImages: 0, maxImageBytes: 0, maxVideos: 1, maxVideoDurationSeconds: DEFAULT_VIDEO_PROCESSING_MAX_SOURCE_SECONDS, maxAudios: 0 };

@@ -74,6 +74,8 @@ func OfficialDeclarativeVideoInterface(interfaceType string) (string, bool) {
 		return "火山方舟", true
 	case "wenew-h3-video":
 		return "WeNew H3", true
+	case "vgenv-video":
+		return "vgenv", true
 	case string(model.ChannelInterfaceVolcengineJiMengVideo):
 		return "即梦", true
 	case string(model.ChannelInterfaceNewAPIVideo):

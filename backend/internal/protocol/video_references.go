@@ -169,6 +169,11 @@ func arrayReferences(parent, field, role string, rejectFrames bool) videoReferen
 					return wire, errors.New("当前视频协议混合首尾帧时的参考图编号规则不明确，请改用纯参考图生成")
 				}
 				value, _ = image["url"].(string)
+				if value == "" {
+					// 兼容 OpenAI 风格嵌套对象（如 vgenv 的 {type, image_url: {url}}）。
+					nested, _ := image["image_url"].(map[string]any)
+					value, _ = nested["url"].(string)
+				}
 			}
 			wire.slots = append(wire.slots, videoImageSlot{value: value, role: role})
 		}

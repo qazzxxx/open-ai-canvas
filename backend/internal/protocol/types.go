@@ -203,8 +203,9 @@ type Metadata struct {
 	// DetachedPolling 表示上游可能排队数小时：提交后释放 worker，由任务调度按间隔回查原任务。
 	DetachedPolling bool `json:"-"`
 	// IdempotentCreate 表示 create 以宿主幂等键作为上游任务 ID，同一键重复提交不会重复扣费，可安全重试。
-	IdempotentCreate  bool   `json:"-"`
-	UnavailableReason string `json:"-"`
+	IdempotentCreate  bool                     `json:"-"`
+	UnavailableReason string                   `json:"-"`
+	ReferenceSyntax   *ManifestReferenceSyntax `json:"-"`
 	// Kind 区分生成类与处理类 provider；处理类以输入媒体为主体，不要求 prompt。
 	Kind ProviderKind `json:"kind,omitempty"`
 	// TextWire / AgentWire 是 create / agent 声明路径对应的宿主已知文本线格式（见 textwire.go），
@@ -383,28 +384,29 @@ type ManifestPaymentResponse struct {
 }
 
 type ManifestProvider struct {
-	ID                      string                  `json:"id"`
-	Label                   string                  `json:"label"`
-	Kind                    ProviderKind            `json:"kind,omitempty"`
-	Capabilities            []Capability            `json:"capabilities"`
-	Scopes                  []Surface               `json:"scopes"`
-	BaseURL                 string                  `json:"baseUrl,omitempty"`
-	RequiresPublicMediaURLs bool                    `json:"requiresPublicMediaUrls,omitempty"`
-	DetachedPolling         bool                    `json:"detachedPolling,omitempty"`
-	IdempotentCreate        bool                    `json:"idempotentCreate,omitempty"`
-	Auth                    ManifestAuth            `json:"auth,omitempty"`
-	Parameters              []Parameter             `json:"parameters,omitempty"`
-	ImageParameters         []ImageParameter        `json:"imageParameters,omitempty"`
-	VideoReferences         *VideoReferenceContract `json:"videoReferences,omitempty"`
-	Validations             []ManifestValidation    `json:"validations,omitempty"`
-	Create                  ManifestOperation       `json:"create"`
-	Upload                  *ManifestUpload         `json:"upload,omitempty"`
-	Agent                   *ManifestOperation      `json:"agent,omitempty"`
-	Poll                    *ManifestOperation      `json:"poll,omitempty"`
-	Cancel                  *ManifestOperation      `json:"cancel,omitempty"`
-	Result                  *ManifestOperation      `json:"result,omitempty"`
-	Response                ManifestResponse        `json:"response"`
-	AgentResponse           *ManifestAgentResponse  `json:"agentResponse,omitempty"`
+	ID                      string                   `json:"id"`
+	Label                   string                   `json:"label"`
+	Kind                    ProviderKind             `json:"kind,omitempty"`
+	Capabilities            []Capability             `json:"capabilities"`
+	Scopes                  []Surface                `json:"scopes"`
+	BaseURL                 string                   `json:"baseUrl,omitempty"`
+	RequiresPublicMediaURLs bool                     `json:"requiresPublicMediaUrls,omitempty"`
+	DetachedPolling         bool                     `json:"detachedPolling,omitempty"`
+	IdempotentCreate        bool                     `json:"idempotentCreate,omitempty"`
+	Auth                    ManifestAuth             `json:"auth,omitempty"`
+	Parameters              []Parameter              `json:"parameters,omitempty"`
+	ImageParameters         []ImageParameter         `json:"imageParameters,omitempty"`
+	VideoReferences         *VideoReferenceContract  `json:"videoReferences,omitempty"`
+	Validations             []ManifestValidation     `json:"validations,omitempty"`
+	Create                  ManifestOperation        `json:"create"`
+	Upload                  *ManifestUpload          `json:"upload,omitempty"`
+	Agent                   *ManifestOperation       `json:"agent,omitempty"`
+	Poll                    *ManifestOperation       `json:"poll,omitempty"`
+	Cancel                  *ManifestOperation       `json:"cancel,omitempty"`
+	Result                  *ManifestOperation       `json:"result,omitempty"`
+	Response                ManifestResponse         `json:"response"`
+	AgentResponse           *ManifestAgentResponse   `json:"agentResponse,omitempty"`
+	ReferenceSyntax         *ManifestReferenceSyntax `json:"referenceSyntax,omitempty"`
 }
 
 type ManifestAuth struct {

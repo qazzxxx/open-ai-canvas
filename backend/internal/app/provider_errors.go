@@ -248,6 +248,8 @@ func providerPayloadErrorCategory(raw string) (string, bool) {
 	case (strings.Contains(normalized, "thinking") || strings.Contains(normalized, "reasoning")) && strings.Contains(normalized, "tool_choice"),
 		strings.Contains(normalized, "tool_choice") && (strings.Contains(normalized, "not support") || strings.Contains(normalized, "unsupported")):
 		return "当前模型为思考/推理模式，不支持强制工具调用（tool_choice=required），请改用自动工具选择或更换非思考模式模型", true
+	case strings.Contains(normalized, "prompt must be") && strings.Contains(normalized, "characters"):
+		return "提示词字符数不符合模型要求，vgenv 提示词必须在 5 到 30000 个字符之间，请补充描述", true
 	case strings.Contains(normalized, "invalid"), strings.Contains(normalized, "parameter"), strings.Contains(normalized, "argument"):
 		return "模型服务拒绝了请求，请检查模型和参数", true
 	}
