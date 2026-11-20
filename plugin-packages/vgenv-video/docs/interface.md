@@ -140,20 +140,9 @@
         "requiresPublicMediaUrls": false,
         "detachedPolling": true,
         "idempotentCreate": true,
-        "referenceSyntax": {
-          "image": "<Picture {n}>",
-          "firstFrame": "[First frame]",
-          "lastFrame": "[Last frame]",
-          "honorFrameNodes": true,
-          "singleImageIsFirstFrame": true
-        },
         "auth": {
           "type": "bearer",
           "field": "apiKey"
-        },
-        "videoReferences": {
-          "layout": "reference-images",
-          "token": "<Picture {n}>"
         },
         "parameters": [
           {
