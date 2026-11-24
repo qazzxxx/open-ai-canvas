@@ -103,7 +103,7 @@
   "apiVersion": "yingce.plugin/v2",
   "id": "vgenv-video",
   "name": "vgenv Video",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": "vgenv / 影策",
   "description": "vgenv V3 异步视频接口：文生视频、首帧、尾帧、首尾帧、全能参考（最多 9 张图）与首帧 + 参考图。",
   "documentation": "<当前插件的完整 documentation，由 README.md 与 docs/interface.md 拼接而成；为避免 JSON 递归，此处不重复展开正文。>",
@@ -143,6 +143,11 @@
         "auth": {
           "type": "bearer",
           "field": "apiKey"
+        },
+        "videoReferences": {
+          "layout": "reference-images",
+          "token": "<Picture {n}>",
+          "dramaTailFrame": "reference-image"
         },
         "parameters": [
           {
@@ -258,11 +263,14 @@
                 [
                   "base",
                   "cinematic",
-                  "origin"
+                  "origin",
+                  "minimax/h3",
+                  "minimax/h3-human",
+                  "minimax/h3-native"
                 ]
               ]
             },
-            "message": "vgenv 模型 ID 必须写成 <model>:<tier>，model 为 base、cinematic 或 origin"
+            "message": "vgenv 模型 ID 必须写成 <model>:<tier>，如 base:fast、cinematic:fast、origin:fast 或 minimax/h3:fast"
           },
           {
             "assert": {
@@ -888,6 +896,9 @@
                       "url": {
                         "$ref": "media.value"
                       }
+                    },
+                    "url": {
+                      "$ref": "media.value"
                     }
                   }
                 }
